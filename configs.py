@@ -114,10 +114,10 @@ class Config:
         parser.add_argument("--lr", type=float, default=1e-4)
         parser.add_argument("--beta1", type=float, default=0.9)
         parser.add_argument("--beta2", type=float, default=0.99)
-        parser.add_argument("--weight_decay", type=float, default=0.0)
+        parser.add_argument("--weight_decay", type=float, default=0.01)
 
         # Training
-        parser.add_argument("--global_batch", type=int, default=256)
+        parser.add_argument("--global_batch", type=int, default=128)
         parser.add_argument("--steps", type=int, default=200_000)
         parser.add_argument("--seed", type=int, default=42)
         parser.add_argument("--class_dropout_prob", type=float, default=0.1)
@@ -137,7 +137,7 @@ class Config:
 
         # Eval / Sampling
         parser.add_argument("--cfg_scale", type=float, default=1.0)
-        parser.add_argument("--sample_steps", type=int, default=50)
+        parser.add_argument("--sample_steps", type=int, default=128)
         parser.add_argument("--num_sample_images", type=int, default=16)
         parser.add_argument("--fid_n", type=int, default=4096)
         parser.add_argument("--fid_cache_path", type=str,
@@ -146,7 +146,7 @@ class Config:
         parser.add_argument("--fid_inception_batch", type=int, default=64)
 
         # Logging / Checkpoint
-        parser.add_argument("--log_every", type=int, default=100)
+        parser.add_argument("--log_every", type=int, default=500)
         parser.add_argument("--eval_every", type=int, default=5_000)
         parser.add_argument("--sample_every", type=int, default=10_000)
         parser.add_argument("--fid_every", type=int, default=50_000)
