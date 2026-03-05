@@ -22,7 +22,7 @@ from configs import Config
 from data import create_loader
 from dit import JepaDiT
 from train_state import TrainState
-from train_step import train_step_baseline, train_step_jepa
+from train_step import StaticConfig, train_step_baseline, train_step_jepa
 from sample import sample_images
 from checkpoint import save_checkpoint, maybe_restore, BestMetricTracker
 from logging_utils import (
@@ -49,21 +49,21 @@ def make_optimizer(config: Config):
     )
 
 
-def make_config_static(config: Config) -> dict:
-    """Extract static hyperparams as a plain dict for pmap'd steps."""
-    return {
-        "aug_flip_p": config.aug_flip_p,
-        "aug_jitter_eps": config.aug_jitter_eps,
-        "mask_ratio": config.mask_ratio,
-        "lambda_jepa": config.lambda_jepa,
-        "ema_decay": config.ema_decay,
-        "patch_size": config.patch_size,
-        "latent_size": config.latent_size,
+def make_config_static(config: Config) -> StaticConfig:
+    """Extract static hyperparams for pmap'd steps."""
+    return StaticConfig(
+        aug_flip_p=config.aug_flip_p,
+        aug_jitter_eps=config.aug_jitter_eps,
+        mask_ratio=config.mask_ratio,
+        lambda_jepa=config.lambda_jepa,
+        ema_decay=config.ema_decay,
+        patch_size=config.patch_size,
+        latent_size=config.latent_size,
         # Timestep schedule: 0=lognormal (default), 1=uniform
-        "t_schedule": 0 if config.t_schedule == "lognormal" else 1,
-        "t_lognorm_mean": config.t_lognorm_mean,
-        "t_lognorm_std": config.t_lognorm_std,
-    }
+        t_schedule=0 if config.t_schedule == "lognormal" else 1,
+        t_lognorm_mean=config.t_lognorm_mean,
+        t_lognorm_std=config.t_lognorm_std,
+    )
 
 
 def shard_batch(batch, num_devices):
@@ -149,9 +149,8 @@ def main():
 
     prefetcher = jax_utils.prefetch_to_device(sharded_iter(train_loader), size=2)
 
-    # --- Config static (replicated dict for pmap) ---
+    # --- Config static (broadcasted as pmap static arg) ---
     config_static = make_config_static(config)
-    config_static_rep = jax_utils.replicate(config_static)
 
     # --- Best metric tracker ---
     best_tracker = BestMetricTracker(config)
@@ -178,7 +177,7 @@ def main():
             break
 
         step_start = time.perf_counter()
-        state, metrics = train_step_fn(state, sharded_batch, config_static_rep)
+        state, metrics = train_step_fn(state, sharded_batch, config_static)
         step_time = time.perf_counter() - step_start
         pbar.update(1)
 

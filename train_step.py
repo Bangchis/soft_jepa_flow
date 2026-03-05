@@ -7,6 +7,7 @@ RNG is per-device via fold_in(axis_index).
 from __future__ import annotations
 
 import functools
+from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -18,35 +19,54 @@ from augment import augment_latents
 # Timestep sampling: lognormal (default) or uniform
 # -------------------------------------------------------------------------
 
+class StaticConfig(NamedTuple):
+    """Static hyperparameters broadcasted into pmap."""
+    aug_flip_p: float
+    aug_jitter_eps: float
+    mask_ratio: float
+    lambda_jepa: float
+    ema_decay: float
+    patch_size: int
+    latent_size: int
+    t_schedule: int
+    t_lognorm_mean: float
+    t_lognorm_std: float
+
+
 def sample_timesteps(rng, shape, config_static):
     """Sample timesteps in [0, 1].
 
-    config_static["t_schedule"]: int (0 = lognormal, 1 = uniform)
+    config_static.t_schedule: int (0 = lognormal, 1 = uniform)
     Lognormal: sigmoid(N(mean, std)) — biases toward mid-schedule.
     """
     def _lognormal(rng):
         u = jax.random.normal(rng, shape)
-        u = u * config_static["t_lognorm_std"] + config_static["t_lognorm_mean"]
+        u = u * config_static.t_lognorm_std + config_static.t_lognorm_mean
         return jax.nn.sigmoid(u)
 
     def _uniform(rng):
         return jax.random.uniform(rng, shape)
 
-    return jax.lax.cond(config_static["t_schedule"] == 0, _lognormal, _uniform, rng)
+    return jax.lax.cond(config_static.t_schedule == 0, _lognormal, _uniform, rng)
 
 
 # -------------------------------------------------------------------------
 # Baseline training step (rectified flow)
 # -------------------------------------------------------------------------
 
-@functools.partial(jax.pmap, axis_name="batch", donate_argnums=(0,))
+@functools.partial(
+    jax.pmap,
+    axis_name="batch",
+    donate_argnums=(0,),
+    static_broadcasted_argnums=(2,),
+)
 def train_step_baseline(state, batch, config_static):
     """One training step for baseline mode (rectified flow MSE).
 
     Args:
         state:         TrainState (replicated)
         batch:         {"latent": (B, 32, 32, 4), "label": (B, 100)}
-        config_static: dict with static float/int hyperparams
+        config_static: StaticConfig with static hyperparams
 
     Returns:
         (state, metrics)
@@ -60,9 +80,12 @@ def train_step_baseline(state, batch, config_static):
     B = z0.shape[0]
 
     # Augment
-    z0 = augment_latents(rng_aug, z0,
-                         flip_p=config_static["aug_flip_p"],
-                         jitter_eps=config_static["aug_jitter_eps"])
+    z0 = augment_latents(
+        rng_aug,
+        z0,
+        flip_p=config_static.aug_flip_p,
+        jitter_eps=config_static.aug_jitter_eps,
+    )
 
     # Sample timestep t ∈ [0,1] (lognormal or uniform) and noise z1 ~ N(0,I)
     t = sample_timesteps(rng_t, (B,), config_static)
@@ -104,14 +127,19 @@ def train_step_baseline(state, batch, config_static):
 # JEPA training step (dual-timestep + cross-attention predictor)
 # -------------------------------------------------------------------------
 
-@functools.partial(jax.pmap, axis_name="batch", donate_argnums=(0,))
+@functools.partial(
+    jax.pmap,
+    axis_name="batch",
+    donate_argnums=(0,),
+    static_broadcasted_argnums=(2,),
+)
 def train_step_jepa(state, batch, config_static):
     """One training step for JEPA mode.
 
     Args:
         state:         TrainState (replicated)
         batch:         {"latent": (B, 32, 32, 4), "label": (B, 100)}
-        config_static: dict with static float/int hyperparams:
+        config_static: StaticConfig with static hyperparams:
             aug_flip_p, aug_jitter_eps, mask_ratio, lambda_jepa, ema_decay,
             patch_size, latent_size
 
@@ -127,16 +155,19 @@ def train_step_jepa(state, batch, config_static):
     z0 = batch["latent"]
     y = batch["label"]
     B = z0.shape[0]
-    p = config_static["patch_size"]
-    H = W = config_static["latent_size"]
+    p = config_static.patch_size
+    H = W = config_static.latent_size
     gh = H // p
     gw = W // p
     N = gh * gw
 
     # Augment
-    z0 = augment_latents(rng_aug, z0,
-                         flip_p=config_static["aug_flip_p"],
-                         jitter_eps=config_static["aug_jitter_eps"])
+    z0 = augment_latents(
+        rng_aug,
+        z0,
+        flip_p=config_static.aug_flip_p,
+        jitter_eps=config_static.aug_jitter_eps,
+    )
 
     # --- Dual timestep (lognormal or uniform) ---
     t = sample_timesteps(rng_t, (B,), config_static)
@@ -145,7 +176,7 @@ def train_step_jepa(state, batch, config_static):
     tau_max = jnp.maximum(t, s)
 
     # --- Token mask M_tok: (B, N) ---
-    mask_ratio = config_static["mask_ratio"]
+    mask_ratio = config_static.mask_ratio
     M_tok = (jax.random.uniform(rng_mask, (B, N)) < mask_ratio).astype(jnp.float32)
 
     # --- Build M_lat from M_tok (patch-aligned upsample) ---
@@ -194,7 +225,7 @@ def train_step_jepa(state, batch, config_static):
 
         l_jepa = 1.0 - jnp.sum(M_tok * cos_sim) / (jnp.sum(M_tok) + 1e-8)
 
-        lambda_j = config_static["lambda_jepa"]
+        lambda_j = config_static.lambda_jepa
         l_total = l_gen + lambda_j * l_jepa
 
         return l_total, {"l_gen": l_gen, "l_jepa": l_jepa, "l_total": l_total}
@@ -208,7 +239,7 @@ def train_step_jepa(state, batch, config_static):
     state = state.apply_gradients(grads)
 
     # EMA update
-    ema_decay = config_static["ema_decay"]
+    ema_decay = config_static.ema_decay
     state = state.update_ema(ema_decay)
 
     # Advance RNG
