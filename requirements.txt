@@ -8,5 +8,9 @@ wandb
 huggingface_hub
 scipy
 Pillow
-tensorflow
-tensorflow_hub
+torch --index-url https://download.pytorch.org/whl/cpu
+diffusers
+transformers
+safetensors
+requests
+tqdm

@@ -198,6 +198,12 @@ def main():
             if config.best_metric == "val_loss":
                 best_tracker.update(state, val_metrics.get("l_total", float("inf")), step)
 
+        # --- Lightweight JEPA validation (L_JEPA + L_total) ---
+        if config.mode == "jepa" and step % config.eval_jepa_every == 0:
+            jepa_val = run_jepa_validation(state, val_loader, config, num_devices)
+            log_metrics(jepa_val, step, prefix="val")
+            print(f"  [JEPA val] step {step}: {jepa_val}")
+
         # --- FID ---
         if step % config.fid_every == 0 and step > 0:
             from fid import compute_fid as compute_fid_fn
@@ -215,15 +221,10 @@ def main():
                 state_single.ema_params,
                 fid_rng,
                 fid_val_loader,
-                fid_n=config.fid_n,
-                num_classes=config.num_classes,
-                sample_steps=config.sample_steps,
-                cfg_scale=config.cfg_scale,
-                seed=config.seed,
+                config,
             )
 
-            import wandb
-            wandb.log({"eval/quick_fid_4096": fid_score}, step=step)
+            log_metrics({"quick_fid_4096": fid_score}, step, prefix="eval")
             print(f"  [FID] step {step}: {fid_score:.2f}")
 
             if config.best_metric == "quick_fid_4096":
@@ -289,6 +290,93 @@ def run_validation(state, val_loader, config: Config, num_devices: int) -> dict:
         count += 1
 
         if count >= 50:  # Cap val batches for speed
+            break
+
+    if count > 0:
+        total_metrics = {k: v / count for k, v in total_metrics.items()}
+
+    return total_metrics
+
+
+def run_jepa_validation(state, val_loader, config: Config, num_devices: int) -> dict:
+    """Lightweight JEPA val: 1–2 batches, compute L_gen + L_JEPA + L_total (no grad)."""
+    state_single = jax_utils.unreplicate(state)
+    p = config.patch_size
+    H = W = config.latent_size
+    gh, gw = H // p, W // p
+    N = gh * gw
+
+    total_metrics = {}
+    count = 0
+
+    for batch in val_loader:
+        batch_jax = jax.tree.map(lambda x: jnp.array(x), batch)
+        # Use first shard only (single device)
+        sharded = shard_batch(batch_jax, num_devices)
+        z0 = sharded["latent"][0]
+        y = sharded["label"][0]
+        B = z0.shape[0]
+
+        rng_base = jax.random.PRNGKey(count)
+        rng_t, rng_s, rng_noise, rng_mask = jax.random.split(rng_base, 4)
+
+        # Dual timesteps (uniform for val consistency)
+        t = jax.random.uniform(rng_t, (B,))
+        s = jax.random.uniform(rng_s, (B,))
+        tau_min = jnp.minimum(t, s)
+        tau_max = jnp.maximum(t, s)
+
+        # Token mask
+        M_tok = (jax.random.uniform(rng_mask, (B, N)) < config.mask_ratio).astype(jnp.float32)
+
+        # Patch-aligned upsample
+        M_2d = M_tok.reshape(B, gh, gw)
+        M_lat = jnp.repeat(jnp.repeat(M_2d, p, axis=1), p, axis=2)[..., None]
+
+        # Noise
+        z1 = jax.random.normal(rng_noise, z0.shape)
+        v_target = z1 - z0
+
+        # Build inputs
+        tau_min_4d = tau_min[:, None, None, None]
+        tau_max_4d = tau_max[:, None, None, None]
+        tau_mixed_map = M_lat * tau_max_4d + (1.0 - M_lat) * tau_min_4d
+
+        z_clean = (1.0 - tau_min_4d) * z0 + tau_min_4d * z1
+        z_mixed = (1.0 - tau_mixed_map) * z0 + tau_mixed_map * z1
+
+        # Student forward
+        out_stu = state_single.apply_fn(
+            {"params": state_single.params}, z_mixed, tau_max, y,
+            train=False, mode="jepa", mask=M_tok,
+        )
+        v_pred = out_stu["v_pred"]
+        h_pred = out_stu["h_pred"]
+
+        # Teacher forward (EMA params)
+        out_tea = state_single.apply_fn(
+            {"params": state_single.ema_params}, z_clean, tau_min, y,
+            train=False, mode="teacher",
+        )
+        h_target = out_tea["h_target"]
+
+        # L_gen
+        l_gen = float(jnp.mean((v_pred - v_target) ** 2))
+
+        # L_JEPA: cosine similarity
+        h_pred_norm = h_pred / (jnp.linalg.norm(h_pred, axis=-1, keepdims=True) + 1e-8)
+        h_tgt_norm = h_target / (jnp.linalg.norm(h_target, axis=-1, keepdims=True) + 1e-8)
+        cos_sim = jnp.sum(h_pred_norm * h_tgt_norm, axis=-1)
+        l_jepa = float(1.0 - jnp.sum(M_tok * cos_sim) / (jnp.sum(M_tok) + 1e-8))
+
+        l_total = l_gen + config.lambda_jepa * l_jepa
+        batch_metrics = {"l_gen": l_gen, "l_jepa": l_jepa, "l_total": l_total}
+
+        for k, v in batch_metrics.items():
+            total_metrics[k] = total_metrics.get(k, 0.0) + v
+        count += 1
+
+        if count >= 2:  # Cap at 2 batches for speed
             break
 
     if count > 0:

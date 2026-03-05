@@ -53,10 +53,14 @@ class Config:
     sample_steps: int = 128
     num_sample_images: int = 16
     fid_n: int = 4096
+    fid_cache_path: str = "checkpoints/fid_real_stats_4096.npz"
+    fid_decode_batch: int = 32
+    fid_inception_batch: int = 64
 
     # --- Logging / Checkpoint ---
     log_every: int = 1000
     eval_every: int = 5_000
+    eval_jepa_every: int = 5_000
     sample_every: int = 40_000
     fid_every: int = 50_000
     ckpt_every: int = 50_000
@@ -137,10 +141,15 @@ class Config:
         parser.add_argument("--sample_steps", type=int, default=50)
         parser.add_argument("--num_sample_images", type=int, default=16)
         parser.add_argument("--fid_n", type=int, default=4096)
+        parser.add_argument("--fid_cache_path", type=str,
+                            default="checkpoints/fid_real_stats_4096.npz")
+        parser.add_argument("--fid_decode_batch", type=int, default=32)
+        parser.add_argument("--fid_inception_batch", type=int, default=64)
 
         # Logging / Checkpoint
         parser.add_argument("--log_every", type=int, default=100)
         parser.add_argument("--eval_every", type=int, default=5_000)
+        parser.add_argument("--eval_jepa_every", type=int, default=5_000)
         parser.add_argument("--sample_every", type=int, default=10_000)
         parser.add_argument("--fid_every", type=int, default=50_000)
         parser.add_argument("--ckpt_every", type=int, default=50_000)

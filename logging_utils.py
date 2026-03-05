@@ -52,7 +52,7 @@ def log_grad_stats(grads, params, step: int):
 def log_activation_debug(params, step: int, block_indices: list[int] | None = None):
     """Log lightweight activation/gate statistics (scalar only, no histograms).
 
-    Checks adaLN gate stats to detect 'gates stuck at 0' issues.
+    Checks adaLN gate stats to detect 'gates stuck at 0' issue.
     """
     import wandb
 
@@ -97,41 +97,33 @@ def log_nan_inf_counts(metrics: dict, step: int):
 
 
 def log_sample_grid(
-    images: np.ndarray,
+    latents: np.ndarray,
     step: int,
     key: str = "samples",
-    scaling_factor: float = 0.18215,
 ):
-    """Log a grid of latent samples as a W&B image.
+    """Decode latents via SD-VAE and log a grid of RGB images to W&B.
 
     Args:
-        images: (N, 32, 32, 4) latent samples
-        step:   current training step
-        key:    W&B log key
-        scaling_factor: VAE scaling factor for denormalization
+        latents: (N, 32, 32, 4) latent samples (scaled, as from training)
+        step:    current training step
+        key:     W&B log key
     """
     import wandb
-    from PIL import Image
+    from vae_decode import decode_latents_nhwc
+
+    # True SD-VAE decode → (N, 256, 256, 3) in [0, 1]
+    images = decode_latents_nhwc(latents)
 
     n = images.shape[0]
     cols = int(np.ceil(np.sqrt(n)))
     rows = int(np.ceil(n / cols))
 
-    # Convert latents to pseudo-RGB for visualization
-    vis_list = []
-    for i in range(n):
-        z = images[i] / scaling_factor
-        z = (z + 1.0) / 2.0
-        z = np.clip(z, 0, 1)
-        rgb = z[:, :, :3]  # first 3 channels
-        vis_list.append((rgb * 255).astype(np.uint8))
-
-    # Build grid
-    h, w = vis_list[0].shape[:2]
+    h, w = images.shape[1], images.shape[2]
     grid = np.zeros((rows * h, cols * w, 3), dtype=np.uint8)
-    for i, img in enumerate(vis_list):
+    for i in range(n):
+        rgb_uint8 = (np.clip(images[i], 0, 1) * 255).astype(np.uint8)
         r, c = divmod(i, cols)
-        grid[r * h : (r + 1) * h, c * w : (c + 1) * w] = img
+        grid[r * h : (r + 1) * h, c * w : (c + 1) * w] = rgb_uint8
 
     wandb.log({key: wandb.Image(grid)}, step=step)
 
