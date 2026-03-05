@@ -239,7 +239,35 @@ def train_step_jepa(state, batch, config_static):
         lambda_j = config_static.lambda_jepa
         l_total = l_gen + lambda_j * l_jepa
 
-        return l_total, {"l_gen": l_gen, "l_jepa": l_jepa, "l_total": l_total}
+        # Debug metrics to diagnose NaN/Inf quickly.
+        mask_count = jnp.sum(M_tok, axis=1)
+        v_pred_finite = jnp.mean(jnp.isfinite(v_pred).astype(jnp.float32))
+        h_pred_finite = jnp.mean(jnp.isfinite(h_pred).astype(jnp.float32))
+        h_target_finite = jnp.mean(jnp.isfinite(h_target).astype(jnp.float32))
+        cos_finite = jnp.mean(jnp.isfinite(cos_sim).astype(jnp.float32))
+
+        debug_metrics = {
+            "dbg_mask_mean": jnp.mean(M_tok),
+            "dbg_mask_min_count": jnp.min(mask_count),
+            "dbg_mask_max_count": jnp.max(mask_count),
+            "dbg_no_target_rate": jnp.mean((mask_count == 0).astype(jnp.float32)),
+            "dbg_all_target_rate": jnp.mean((mask_count == N).astype(jnp.float32)),
+            "dbg_tau_min": jnp.min(tau_min),
+            "dbg_tau_max": jnp.max(tau_max),
+            "dbg_z0_absmax": jnp.max(jnp.abs(z0)),
+            "dbg_v_pred_absmax": jnp.max(jnp.abs(jnp.nan_to_num(v_pred))),
+            "dbg_h_pred_absmax": jnp.max(jnp.abs(jnp.nan_to_num(h_pred))),
+            "dbg_h_target_absmax": jnp.max(jnp.abs(jnp.nan_to_num(h_target))),
+            "dbg_v_pred_finite": v_pred_finite,
+            "dbg_h_pred_finite": h_pred_finite,
+            "dbg_h_target_finite": h_target_finite,
+            "dbg_cos_finite": cos_finite,
+            "dbg_l_gen_finite": jnp.isfinite(l_gen).astype(jnp.float32),
+            "dbg_l_jepa_finite": jnp.isfinite(l_jepa).astype(jnp.float32),
+            "dbg_l_total_finite": jnp.isfinite(l_total).astype(jnp.float32),
+        }
+
+        return l_total, {"l_gen": l_gen, "l_jepa": l_jepa, "l_total": l_total, **debug_metrics}
 
     (loss, metrics), grads = jax.value_and_grad(loss_fn, has_aux=True)(state.params)
 
