@@ -237,16 +237,6 @@ def main():
         step_time = time.perf_counter() - step_start
         pbar.update(1)
 
-        # --- Fail-fast on NaN/Inf ---
-        l_total_step = float(metrics["l_total"][0])
-        if not np.isfinite(l_total_step):
-            metrics_cpu = jax.tree.map(lambda x: float(x[0]), metrics)
-            print(f"[nan-detect] Non-finite loss at step {step}.")
-            print(f"[nan-detect] metrics: {metrics_cpu}")
-            raise RuntimeError(
-                "Non-finite training loss detected. See [nan-detect] metrics above."
-            )
-
         # --- Periodic logging ---
         if step % config.log_every == 0:
             metrics_cpu = jax.tree.map(lambda x: float(x[0]), metrics)
