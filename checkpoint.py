@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import os
 from datetime import datetime, timezone
@@ -165,6 +166,103 @@ class BestMetricTracker:
             return f"{self.config.hf_username}/{self.config.hf_repo_name}"
         return ""
 
+    def _build_model_card(
+        self,
+        *,
+        repo_id: str,
+        step: int,
+        metric_value: float,
+        uploaded_at_utc: str,
+    ) -> str:
+        """Build an English HF model card with architecture + metrics + upload timing."""
+        c = self.config
+        objective_text = (
+            "L_total = L_gen + lambda_jepa * L_jepa (teacher-student JEPA objective with EMA teacher)."
+            if c.mode == "jepa"
+            else "L_total = L_gen (rectified-flow velocity prediction objective)."
+        )
+        jepa_details = (
+            f"- Student layer: `{c.student_layer}`\n"
+            f"- Teacher layer: `{c.teacher_layer}`\n"
+            f"- Mask ratio: `{c.mask_ratio}`\n"
+            f"- Lambda JEPA: `{c.lambda_jepa}`\n"
+            if c.mode == "jepa"
+            else "- JEPA branch: disabled in baseline mode.\n"
+        )
+
+        return f"""---
+license: apache-2.0
+library_name: flax
+tags:
+- jax
+- flax
+- diffusion-transformer
+- rectified-flow
+- jepa
+---
+
+# Soft-JEPA-Flow ({c.run_name})
+
+This repository stores checkpoints automatically uploaded from training.
+
+## Model Architecture
+- Backbone: DiT-style Transformer in JAX/Flax.
+- Patch size: `{c.patch_size}`
+- Hidden size: `{c.hidden_size}`
+- Depth: `{c.depth}`
+- Attention heads: `{c.num_heads}`
+- MLP ratio: `{c.mlp_ratio}`
+- Latent shape: `{c.latent_size}x{c.latent_size}x{c.latent_channels}`
+- Number of classes: `{c.num_classes}`
+{jepa_details}
+## Training Objective
+- Mode: `{c.mode}`
+- Objective: {objective_text}
+- Optimizer: `{c.opt}` (lr=`{c.lr}`, beta1=`{c.beta1}`, beta2=`{c.beta2}`, weight_decay=`{c.weight_decay}`)
+- Timestep schedule: `{c.t_schedule}` (mean=`{c.t_lognorm_mean}`, std=`{c.t_lognorm_std}`)
+
+## Metrics
+- Best metric key: `{self.metric_name}`
+- Best metric value: `{metric_value:.6f}`
+- Best checkpoint step: `{step}`
+
+## Upload Timing (Automatic)
+- Upload policy: upload whenever a **new best metric** is observed.
+- Upload timestamp (UTC): `{uploaded_at_utc}`
+- Run name: `{c.run_name}`
+- Path for this artifact: `{c.run_name}/best/step_{step}_{uploaded_at_utc}`
+
+## Evaluation Notes
+- FID pipeline uses latent decode with `stabilityai/sd-vae-ft-mse`, then InceptionV3 features.
+- Inception input range is `[-1, 1]` after resize to `299x299`.
+
+## Minimal Sampling/Inference Note
+- The sampler uses the velocity head in `mode="baseline"` (including checkpoints trained with JEPA).
+
+## Source
+- HF repo id: `{repo_id}`
+"""
+
+    def _upload_model_card(
+        self,
+        *,
+        api,
+        repo_id: str,
+        readme_text: str,
+        step: int,
+        metric_value: float,
+    ):
+        """Upload/overwrite README.md model card at repo root."""
+        api.upload_file(
+            path_or_fileobj=io.BytesIO(readme_text.encode("utf-8")),
+            path_in_repo="README.md",
+            repo_id=repo_id,
+            repo_type="model",
+            commit_message=(
+                f"update model card: best {self.metric_name}={metric_value:.6f} step={step}"
+            ),
+        )
+
     def _upload_to_hf(self, *, step: int, metric_value: float, folder_path: str):
         """Upload best checkpoint to HuggingFace Hub (create repo on first upload)."""
         token = os.environ.get("HF_TOKEN", "")
@@ -189,6 +287,20 @@ class BestMetricTracker:
             )
 
             ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-UTC")
+            model_card = self._build_model_card(
+                repo_id=repo_id,
+                step=step,
+                metric_value=metric_value,
+                uploaded_at_utc=ts,
+            )
+            self._upload_model_card(
+                api=api,
+                repo_id=repo_id,
+                readme_text=model_card,
+                step=step,
+                metric_value=metric_value,
+            )
+
             path_in_repo = f"{self.config.run_name}/best/step_{step}_{ts}"
             commit_message = (
                 f"best {self.metric_name}={metric_value:.6f} "
