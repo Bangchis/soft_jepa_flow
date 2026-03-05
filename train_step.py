@@ -130,6 +130,13 @@ def train_step_baseline(state, batch, config_static):
     # Sync across devices
     grads = jax.lax.pmean(grads, axis_name="batch")
     metrics = jax.lax.pmean(metrics, axis_name="batch")
+    grad_norm = jax.lax.pmean(_global_norm(grads), axis_name="batch")
+    param_norm = jax.lax.pmean(_global_norm(state.params), axis_name="batch")
+    metrics = {
+        **metrics,
+        "grad_norm": grad_norm,
+        "param_norm": param_norm,
+    }
 
     state = state.apply_gradients(grads)
 
@@ -264,6 +271,13 @@ def train_step_jepa(state, batch, config_static):
     grad_scale = jnp.minimum(1.0, _GRAD_CLIP_NORM / (grad_norm + 1e-6))
     grads = jax.tree.map(lambda g: g * grad_scale, grads)
     metrics = jax.lax.pmean(metrics, axis_name="batch")
+    param_norm = jax.lax.pmean(_global_norm(state.params), axis_name="batch")
+    metrics = {
+        **metrics,
+        "grad_norm": jax.lax.pmean(grad_norm, axis_name="batch"),
+        "grad_scale": jax.lax.pmean(grad_scale, axis_name="batch"),
+        "param_norm": param_norm,
+    }
 
     state = state.apply_gradients(grads)
 

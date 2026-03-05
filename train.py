@@ -30,6 +30,7 @@ from logging_utils import (
     init_wandb,
     log_metrics,
     log_nan_inf_counts,
+    log_activation_debug,
     log_sample_grid,
 )
 
@@ -242,6 +243,9 @@ def main():
             metrics_cpu = jax.tree.map(lambda x: float(x[0]), metrics)
             log_metrics(metrics_cpu, step, prefix="train")
             log_nan_inf_counts(metrics_cpu, step)
+            # Default-on model debug: lightweight activation stats at log cadence.
+            state_single = jax_utils.unreplicate(state)
+            log_activation_debug(state_single.params, step)
             print(f"  step {step}: {metrics_cpu}")
             pbar.set_postfix(
                 l_total=f"{metrics_cpu.get('l_total', float('nan')):.4f}",

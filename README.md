@@ -9,6 +9,7 @@ Tài liệu này phản ánh **trạng thái code hiện tại** trong repo, đ�
 - `train.py`
 - `train_step.py`
 - `sample.py`
+- `infer.py`
 - `fid.py`
 - `vae_decode.py`
 - `inception_fid.py`
@@ -79,13 +80,39 @@ Mỗi batch:
 
 ## 4) Sampling / Infer
 
-Sampling dùng Euler ODE trong latent space (`sample.py`):
+### 4.1 Sampling core (`sample.py`)
+
+Sampling dùng Euler ODE trong latent space:
 - khởi tạo `z ~ N(0, I)` tại `t=1`
 - tích phân về `t=0` trong `sample_steps`
 - CFG: chạy cond/uncond rồi trộn theo `cfg_scale`
 
-Lưu ý quan trọng:
-- Trong sampling, model luôn chạy `mode="baseline"` để lấy head velocity (kể cả checkpoint train bằng JEPA).
+Lưu ý quan trọng: trong sampling, model luôn chạy `mode="baseline"` để lấy head velocity (kể cả checkpoint train bằng JEPA).
+
+### 4.2 Inference CLI độc lập (`infer.py`)
+
+Repo đã có entrypoint inference riêng để chạy trực tiếp từ checkpoint:
+
+```bash
+python infer.py --ckpt_dir <CKPT_ROOT> --num_images 16 --decode
+```
+
+Checkpoint resolve theo thứ tự:
+1. `--ckpt_path` (nếu truyền trực tiếp `step_*`)
+2. `--ckpt_dir/latest`
+3. `step_*` mới nhất trong `--ckpt_dir`
+
+`infer.py` sẽ:
+1. Đọc `config.json` từ checkpoint step dir.
+2. Khởi tạo model đúng kiến trúc và restore strict Orbax (`params`, `ema_params`, `step`, `rng`).
+3. Sample latent bằng `euler_sample(...)`.
+4. Lưu output:
+   - `latents.npy`
+   - `class_ids.npy`
+   - `meta.json`
+   - nếu bật `--decode`: `grid.png` và `images/img_XXXX.png`
+
+Mặc định inference dùng `ema_params`. Có thể dùng raw weights bằng `--use_raw_params`.
 
 ## 5) FID và Visualization (trạng thái hiện tại)
 
@@ -160,6 +187,31 @@ python train.py \
   --cfg_scale 1.0 --sample_steps 50 \
   --fid_n 4096 --fid_cache_path checkpoints/fid_real_stats_4096.npz \
   --fid_decode_batch 32 --fid_inception_batch 64
+```
+
+### 8.3 Inference từ checkpoint
+
+Dùng `latest` (hoặc tự fallback step mới nhất nếu thiếu `latest`):
+
+```bash
+python infer.py \
+  --ckpt_dir /kaggle/working/checkpoints_smoke_jepa_1772736269 \
+  --num_images 16 \
+  --sample_steps 128 \
+  --cfg_scale 1.0 \
+  --decode \
+  --decode_batch 32 \
+  --out_dir /kaggle/working/infer_out
+```
+
+Trỏ thẳng vào một step cụ thể:
+
+```bash
+python infer.py \
+  --ckpt_path /kaggle/working/checkpoints_smoke_jepa_1772736269/step_200 \
+  --num_images 6 \
+  --class_ids 1,2,3 \
+  --decode
 ```
 
 ## 9) Toàn bộ CLI flags và effective defaults (argparse)
