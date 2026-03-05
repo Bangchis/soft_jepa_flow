@@ -22,8 +22,7 @@ Tài liệu này phản ánh **trạng thái code hiện tại** trong repo, đ�
 - Đã bỏ pseudo-RGB khi log ảnh mẫu:
   - `logging_utils.log_sample_grid` decode latent thật bằng SD-VAE.
 - Validation JEPA:
-  - Vẫn có `run_validation` nhánh JEPA dạng đơn giản (`L_gen`).
-  - Có thêm `run_jepa_validation` để log `L_gen`, `L_JEPA`, `L_total` định kỳ.
+  - `run_validation` đã tính trực tiếp `L_gen`, `L_repa`, `L_total`.
 
 ## 2) Dữ liệu đầu vào
 
@@ -110,16 +109,11 @@ Cache real stats:
 
 ## 6) Validation behavior
 
-Trong `train.py` có 2 đường val cho JEPA:
+`run_validation` là đường validation duy nhất:
+- `baseline`: log `L_gen`, `L_total`
+- `jepa`: log `L_gen`, `L_repa`, `L_total`
 
-1. `run_validation`:
-- nhanh, chạy `L_gen` là chính.
-- nhánh JEPA hiện vẫn là bản đơn giản (không tính đầy đủ `L_JEPA`).
-
-2. `run_jepa_validation`:
-- lightweight (1-2 batch).
-- tính và log `L_gen`, `L_JEPA`, `L_total`.
-- chạy theo `--eval_jepa_every`.
+Trong đó `L_repa` là representation loss theo công thức cosine (tương đương thành phần JEPA trong validation).
 
 ## 7) Cài đặt
 
@@ -163,7 +157,6 @@ python train.py \
   --opt adam --lr 1e-4 --beta1 0.9 --beta2 0.99 --weight_decay 0.0 \
   --t_schedule lognormal --t_lognorm_mean -0.4 --t_lognorm_std 1.0 \
   --mask_ratio 0.25 --ema_decay 0.999 --lambda_jepa 0.1 \
-  --eval_jepa_every 5000 \
   --cfg_scale 1.0 --sample_steps 50 \
   --fid_n 4096 --fid_cache_path checkpoints/fid_real_stats_4096.npz \
   --fid_decode_batch 32 --fid_inception_batch 64
@@ -222,7 +215,6 @@ python train.py \
 ### Logging/Checkpoint
 - `--log_every` = `100`
 - `--eval_every` = `5000`
-- `--eval_jepa_every` = `5000`
 - `--sample_every` = `10000`
 - `--fid_every` = `50000`
 - `--ckpt_every` = `50000`
@@ -239,10 +231,8 @@ Khi chạy `python train.py ...`, chương trình dùng `Config.from_args()` nê
 
 ## 11) Known limitations
 
-1. `run_validation` nhánh JEPA vẫn là dạng đơn giản (tập trung `L_gen`), chưa thay thế hoàn toàn bằng loss JEPA đầy đủ.
-2. `run_jepa_validation` chỉ chạy 1-2 batch để giảm chi phí, phù hợp theo dõi nhanh chứ không phải full-val exhaustive.
-3. Decode SD-VAE trên CPU có thể là bottleneck khi `fid_n` lớn hoặc decode batch lớn.
-4. Inception weights trong `inception_fid.py` được tải về lúc cần (lần chạy đầu cần mạng).
+1. Decode SD-VAE trên CPU có thể là bottleneck khi `fid_n` lớn hoặc decode batch lớn.
+2. Inception weights trong `inception_fid.py` được tải về lúc cần (lần chạy đầu cần mạng).
 
 ## 12) Tương thích và checkpoint
 

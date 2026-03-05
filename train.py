@@ -198,12 +198,6 @@ def main():
             if config.best_metric == "val_loss":
                 best_tracker.update(state, val_metrics.get("l_total", float("inf")), step)
 
-        # --- Lightweight JEPA validation (L_JEPA + L_total) ---
-        if config.mode == "jepa" and step % config.eval_jepa_every == 0:
-            jepa_val = run_jepa_validation(state, val_loader, config, num_devices)
-            log_metrics(jepa_val, step, prefix="val")
-            print(f"  [JEPA val] step {step}: {jepa_val}")
-
         # --- FID ---
         if step % config.fid_every == 0 and step > 0:
             from fid import compute_fid as compute_fid_fn
@@ -239,18 +233,13 @@ def main():
 
 def run_validation(state, val_loader, config: Config, num_devices: int) -> dict:
     """Run one pass over val set and compute average metrics."""
-    from train_step import train_step_baseline, train_step_jepa
-
     total_metrics = {}
     count = 0
+    state_single = jax_utils.unreplicate(state)
 
     for batch in val_loader:
         batch_jax = jax.tree.map(lambda x: jnp.array(x), batch)
         sharded = shard_batch(batch_jax, num_devices)
-
-        # Use model in eval mode (no augment, no dropout)
-        # For validation, compute loss only (no gradient)
-        state_single = jax_utils.unreplicate(state)
 
         if config.mode == "baseline":
             # Simple forward pass for val loss
@@ -269,114 +258,63 @@ def run_validation(state, val_loader, config: Config, num_devices: int) -> dict:
             l_gen = float(jnp.mean((out["v_pred"] - v_target) ** 2))
             batch_metrics = {"l_gen": l_gen, "l_total": l_gen}
         else:
-            # Simplified JEPA val: just L_gen (no masking in val)
-            t = jax.random.uniform(jax.random.PRNGKey(count), (sharded["latent"].shape[1],))
+            # JEPA val: L_gen + L_repa + L_total
             z0 = sharded["latent"][0]
             y = sharded["label"][0]
-            z1 = jax.random.normal(jax.random.PRNGKey(count + 1), z0.shape)
-            t_exp = t[:, None, None, None]
-            z_t = (1.0 - t_exp) * z0 + t_exp * z1
+            B = z0.shape[0]
+            p = config.patch_size
+            H = W = config.latent_size
+            gh, gw = H // p, W // p
+            N = gh * gw
+
+            rng_base = jax.random.PRNGKey(count)
+            rng_t, rng_s, rng_noise, rng_mask = jax.random.split(rng_base, 4)
+
+            t = jax.random.uniform(rng_t, (B,))
+            s = jax.random.uniform(rng_s, (B,))
+            tau_min = jnp.minimum(t, s)
+            tau_max = jnp.maximum(t, s)
+
+            M_tok = (jax.random.uniform(rng_mask, (B, N)) < config.mask_ratio).astype(jnp.float32)
+            M_2d = M_tok.reshape(B, gh, gw)
+            M_lat = jnp.repeat(jnp.repeat(M_2d, p, axis=1), p, axis=2)[..., None]
+
+            z1 = jax.random.normal(rng_noise, z0.shape)
             v_target = z1 - z0
 
-            out = state_single.apply_fn(
-                {"params": state_single.params}, z_t, t, y,
-                train=False, mode="baseline",
+            tau_min_4d = tau_min[:, None, None, None]
+            tau_max_4d = tau_max[:, None, None, None]
+            tau_mixed_map = M_lat * tau_max_4d + (1.0 - M_lat) * tau_min_4d
+
+            z_clean = (1.0 - tau_min_4d) * z0 + tau_min_4d * z1
+            z_mixed = (1.0 - tau_mixed_map) * z0 + tau_mixed_map * z1
+
+            out_stu = state_single.apply_fn(
+                {"params": state_single.params}, z_mixed, tau_max, y,
+                train=False, mode="jepa", mask=M_tok,
             )
-            l_gen = float(jnp.mean((out["v_pred"] - v_target) ** 2))
-            batch_metrics = {"l_gen": l_gen, "l_total": l_gen}
+            v_pred = out_stu["v_pred"]
+            h_pred = out_stu["h_pred"]
+
+            out_tea = state_single.apply_fn(
+                {"params": state_single.ema_params}, z_clean, tau_min, y,
+                train=False, mode="teacher",
+            )
+            h_target = out_tea["h_target"]
+
+            l_gen = float(jnp.mean((v_pred - v_target) ** 2))
+            h_pred_norm = h_pred / (jnp.linalg.norm(h_pred, axis=-1, keepdims=True) + 1e-8)
+            h_tgt_norm = h_target / (jnp.linalg.norm(h_target, axis=-1, keepdims=True) + 1e-8)
+            cos_sim = jnp.sum(h_pred_norm * h_tgt_norm, axis=-1)
+            l_repa = float(1.0 - jnp.sum(M_tok * cos_sim) / (jnp.sum(M_tok) + 1e-8))
+            l_total = l_gen + config.lambda_jepa * l_repa
+            batch_metrics = {"l_gen": l_gen, "l_repa": l_repa, "l_total": l_total}
 
         for k, v in batch_metrics.items():
             total_metrics[k] = total_metrics.get(k, 0.0) + v
         count += 1
 
         if count >= 50:  # Cap val batches for speed
-            break
-
-    if count > 0:
-        total_metrics = {k: v / count for k, v in total_metrics.items()}
-
-    return total_metrics
-
-
-def run_jepa_validation(state, val_loader, config: Config, num_devices: int) -> dict:
-    """Lightweight JEPA val: 1–2 batches, compute L_gen + L_JEPA + L_total (no grad)."""
-    state_single = jax_utils.unreplicate(state)
-    p = config.patch_size
-    H = W = config.latent_size
-    gh, gw = H // p, W // p
-    N = gh * gw
-
-    total_metrics = {}
-    count = 0
-
-    for batch in val_loader:
-        batch_jax = jax.tree.map(lambda x: jnp.array(x), batch)
-        # Use first shard only (single device)
-        sharded = shard_batch(batch_jax, num_devices)
-        z0 = sharded["latent"][0]
-        y = sharded["label"][0]
-        B = z0.shape[0]
-
-        rng_base = jax.random.PRNGKey(count)
-        rng_t, rng_s, rng_noise, rng_mask = jax.random.split(rng_base, 4)
-
-        # Dual timesteps (uniform for val consistency)
-        t = jax.random.uniform(rng_t, (B,))
-        s = jax.random.uniform(rng_s, (B,))
-        tau_min = jnp.minimum(t, s)
-        tau_max = jnp.maximum(t, s)
-
-        # Token mask
-        M_tok = (jax.random.uniform(rng_mask, (B, N)) < config.mask_ratio).astype(jnp.float32)
-
-        # Patch-aligned upsample
-        M_2d = M_tok.reshape(B, gh, gw)
-        M_lat = jnp.repeat(jnp.repeat(M_2d, p, axis=1), p, axis=2)[..., None]
-
-        # Noise
-        z1 = jax.random.normal(rng_noise, z0.shape)
-        v_target = z1 - z0
-
-        # Build inputs
-        tau_min_4d = tau_min[:, None, None, None]
-        tau_max_4d = tau_max[:, None, None, None]
-        tau_mixed_map = M_lat * tau_max_4d + (1.0 - M_lat) * tau_min_4d
-
-        z_clean = (1.0 - tau_min_4d) * z0 + tau_min_4d * z1
-        z_mixed = (1.0 - tau_mixed_map) * z0 + tau_mixed_map * z1
-
-        # Student forward
-        out_stu = state_single.apply_fn(
-            {"params": state_single.params}, z_mixed, tau_max, y,
-            train=False, mode="jepa", mask=M_tok,
-        )
-        v_pred = out_stu["v_pred"]
-        h_pred = out_stu["h_pred"]
-
-        # Teacher forward (EMA params)
-        out_tea = state_single.apply_fn(
-            {"params": state_single.ema_params}, z_clean, tau_min, y,
-            train=False, mode="teacher",
-        )
-        h_target = out_tea["h_target"]
-
-        # L_gen
-        l_gen = float(jnp.mean((v_pred - v_target) ** 2))
-
-        # L_JEPA: cosine similarity
-        h_pred_norm = h_pred / (jnp.linalg.norm(h_pred, axis=-1, keepdims=True) + 1e-8)
-        h_tgt_norm = h_target / (jnp.linalg.norm(h_target, axis=-1, keepdims=True) + 1e-8)
-        cos_sim = jnp.sum(h_pred_norm * h_tgt_norm, axis=-1)
-        l_jepa = float(1.0 - jnp.sum(M_tok * cos_sim) / (jnp.sum(M_tok) + 1e-8))
-
-        l_total = l_gen + config.lambda_jepa * l_jepa
-        batch_metrics = {"l_gen": l_gen, "l_jepa": l_jepa, "l_total": l_total}
-
-        for k, v in batch_metrics.items():
-            total_metrics[k] = total_metrics.get(k, 0.0) + v
-        count += 1
-
-        if count >= 2:  # Cap at 2 batches for speed
             break
 
     if count > 0:

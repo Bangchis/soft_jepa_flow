@@ -60,7 +60,6 @@ class Config:
     # --- Logging / Checkpoint ---
     log_every: int = 1000
     eval_every: int = 5_000
-    eval_jepa_every: int = 5_000
     sample_every: int = 40_000
     fid_every: int = 50_000
     ckpt_every: int = 50_000
@@ -149,7 +148,6 @@ class Config:
         # Logging / Checkpoint
         parser.add_argument("--log_every", type=int, default=100)
         parser.add_argument("--eval_every", type=int, default=5_000)
-        parser.add_argument("--eval_jepa_every", type=int, default=5_000)
         parser.add_argument("--sample_every", type=int, default=10_000)
         parser.add_argument("--fid_every", type=int, default=50_000)
         parser.add_argument("--ckpt_every", type=int, default=50_000)
