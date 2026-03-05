@@ -161,7 +161,7 @@ pip install -r requirements.txt
 ```bash
 python train.py \
   --mode baseline \
-  --data_dir /kaggle/input/miniimagenet256-latents-arrayrecord-sdvae \
+  --data_dir /kaggle/input/datasets/bangchi/miniimagenet256-latents-arrayrecord-sdvae \
   --run_name baseline_run \
   --global_batch 256 \
   --steps 200000 \
@@ -177,7 +177,7 @@ python train.py \
 ```bash
 python train.py \
   --mode jepa \
-  --data_dir /kaggle/input/miniimagenet256-latents-arrayrecord-sdvae \
+  --data_dir /kaggle/input/datasets/bangchi/miniimagenet256-latents-arrayrecord-sdvae \
   --run_name jepa_run \
   --global_batch 256 \
   --steps 200000 \
