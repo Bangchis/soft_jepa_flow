@@ -361,3 +361,53 @@ key masks in attention (context-only keys)
 gating by M with where / multiplication
 
 weighted reductions sum(M * ...) / sum(M)
+
+
+## Kaggle usage (where the dataset is and how it is used)
+
+### 1) Add the latents dataset to your notebook
+In Kaggle Notebook:
+- Click **Add Data**
+- Search and add: **bangchi/miniimagenet256-latents-arrayrecord-sdvae**
+
+Kaggle will mount it under:
+
+/kaggle/input/miniimagenet256-latents-arrayrecord-sdvae/
+
+
+Expected contents:
+
+/kaggle/input/miniimagenet256-latents-arrayrecord-sdvae/
+meta_train.json
+meta_val.json
+train/
+train-00000-of-xxxxx.array_record
+...
+val/
+val-00000-of-xxxxx.array_record
+...
+
+
+### 2) Training reads ONLY latents (no images needed)
+The training code reads ArrayRecord shards from:
+- `train/` for training steps
+- `val/` for validation steps
+
+You do **not** need to add the original MiniImageNet images or the splits dataset for training.
+
+### 3) Pass the dataset root via `--data_dir`
+Example:
+```bash
+python train.py \
+  --mode baseline \
+  --data_dir /kaggle/input/miniimagenet256-latents-arrayrecord-sdvae \
+  ...
+4) What one record contains
+
+Each ArrayRecord record corresponds to one image:
+
+label (uint16)
+
+latent (32×32×4, NHWC, fp16 on disk)
+
+The loader forms batches by reading multiple records and stacking them.

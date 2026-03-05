@@ -1,0 +1,12 @@
+jax[tpu]
+flax
+optax
+grain-nightly
+array-record
+orbax-checkpoint
+wandb
+huggingface_hub
+scipy
+Pillow
+tensorflow
+tensorflow_hub
