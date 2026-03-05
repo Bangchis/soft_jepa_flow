@@ -103,7 +103,15 @@ def maybe_restore(state, config: Config):
     }
 
     checkpointer = ocp.PyTreeCheckpointer()
-    restored = checkpointer.restore(restore_dir, item=target)
+    try:
+        restored = checkpointer.restore(restore_dir, item=target)
+    except Exception as e:
+        raise RuntimeError(
+            "[ckpt] Incompatible checkpoint with current code (strict mode). "
+            "This build requires full JEPA+teacher param tree. "
+            "Please start from scratch or use a checkpoint created by this version. "
+            f"restore_dir={restore_dir}. Original error: {e}"
+        ) from e
 
     state_single = state_single.replace(
         params=restored["params"],

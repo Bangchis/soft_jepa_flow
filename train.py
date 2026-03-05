@@ -15,6 +15,7 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 from flax import jax_utils
+from flax.traverse_util import flatten_dict, unflatten_dict
 from flax.training import common_utils
 from tqdm.auto import tqdm
 
@@ -74,6 +75,57 @@ def shard_batch(batch, num_devices):
     )
 
 
+def merge_param_trees(tree_a, tree_b, *, tree_a_name: str, tree_b_name: str):
+    """Merge two param trees; shared leaves must match shape/dtype."""
+    flat_a = flatten_dict(tree_a)
+    flat_b = flatten_dict(tree_b)
+
+    merged = dict(flat_a)
+    for key, value_b in flat_b.items():
+        if key in merged:
+            value_a = merged[key]
+            shape_a = getattr(value_a, "shape", None)
+            shape_b = getattr(value_b, "shape", None)
+            dtype_a = getattr(value_a, "dtype", None)
+            dtype_b = getattr(value_b, "dtype", None)
+            if shape_a != shape_b or dtype_a != dtype_b:
+                key_str = "/".join(key)
+                raise ValueError(
+                    f"[init] Param mismatch at '{key_str}' while merging "
+                    f"{tree_a_name}+{tree_b_name}: "
+                    f"{shape_a}/{dtype_a} vs {shape_b}/{dtype_b}"
+                )
+            continue
+        merged[key] = value_b
+
+    return unflatten_dict(merged)
+
+
+def init_full_params(model_def, config: Config, *, param_rng, dummy_z, dummy_t, dummy_y):
+    """Initialize full param tree so JEPA and teacher branches are present."""
+    num_tokens = (config.latent_size // config.patch_size) ** 2
+    dummy_mask = jnp.ones((dummy_z.shape[0], num_tokens), dtype=jnp.float32)
+    rng_jepa, rng_teacher = jax.random.split(param_rng)
+
+    params_jepa = model_def.init(
+        {"params": rng_jepa},
+        dummy_z, dummy_t, dummy_y,
+        train=False, mode="jepa", mask=dummy_mask,
+    )["params"]
+    params_teacher = model_def.init(
+        {"params": rng_teacher},
+        dummy_z, dummy_t, dummy_y,
+        train=False, mode="teacher",
+    )["params"]
+
+    return merge_param_trees(
+        params_jepa,
+        params_teacher,
+        tree_a_name="jepa",
+        tree_b_name="teacher",
+    )
+
+
 def main():
     config = Config.from_args()
 
@@ -101,20 +153,24 @@ def main():
 
     # --- Init params ---
     rng = jax.random.PRNGKey(config.seed)
-    rng, param_rng, dropout_rng, state_rng = jax.random.split(rng, 4)
+    rng, param_rng, state_rng = jax.random.split(rng, 3)
 
     dummy_z = jnp.zeros((per_device_batch, config.latent_size, config.latent_size,
                           config.latent_channels))
     dummy_t = jnp.zeros((per_device_batch,))
     dummy_y = jnp.zeros((per_device_batch, config.num_classes))
 
-    params = model_def.init(
-        {"params": param_rng, "label_dropout": dropout_rng},
-        dummy_z, dummy_t, dummy_y,
-        train=False, mode="baseline",
-    )["params"]
+    params = init_full_params(
+        model_def,
+        config,
+        param_rng=param_rng,
+        dummy_z=dummy_z,
+        dummy_t=dummy_t,
+        dummy_y=dummy_y,
+    )
 
     param_count = sum(x.size for x in jax.tree.leaves(params))
+    print("[init] Initialized full param tree for jepa+teacher.")
     print(f"[init] Model params: {param_count:,}")
 
     # --- Optimizer + TrainState ---
