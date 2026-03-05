@@ -66,7 +66,10 @@ class Config:
     run_name: str = "run"
     ckpt_dir: str = "checkpoints"
     best_metric: str = "quick_fid_4096"  # or "val_loss"
-    hf_repo_id: str = ""  # optional HF upload; token via env HF_TOKEN
+    hf_repo_id: str = ""  # full repo id, e.g. "Bangchis/soft-jepa-flow"
+    hf_username: str = "Bangchis"  # used when hf_repo_id is empty
+    hf_repo_name: str = "soft-jepa-flow"  # used with hf_username
+    hf_private: bool = False
 
     # --- Derived (computed, not CLI) ---
     latent_size: int = 32
@@ -156,6 +159,9 @@ class Config:
         parser.add_argument("--best_metric", type=str, default="quick_fid_4096",
                             choices=["quick_fid_4096", "val_loss"])
         parser.add_argument("--hf_repo_id", type=str, default="")
+        parser.add_argument("--hf_username", type=str, default="Bangchis")
+        parser.add_argument("--hf_repo_name", type=str, default="soft-jepa-flow")
+        parser.add_argument("--hf_private", action="store_true")
 
         args = parser.parse_args()
 

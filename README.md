@@ -221,7 +221,10 @@ python train.py \
 - `--run_name` = `run`
 - `--ckpt_dir` = `checkpoints`
 - `--best_metric` = `quick_fid_4096` (`quick_fid_4096|val_loss`)
-- `--hf_repo_id` = `""`
+- `--hf_repo_id` = `""` (nếu để rỗng sẽ dùng `hf_username/hf_repo_name`)
+- `--hf_username` = `"Bangchis"`
+- `--hf_repo_name` = `"soft-jepa-flow"`
+- `--hf_private` = `False` (bật flag `--hf_private` để tạo repo private)
 
 ## 10) Ghi chú kỹ thuật: Dataclass defaults vs CLI defaults
 
@@ -239,3 +242,9 @@ Khi chạy `python train.py ...`, chương trình dùng `Config.from_args()` nê
 - Model checkpoint lưu cả `params`, `ema_params`, `opt_state`, `step`, `rng`.
 - Sampling/FID trong training loop dùng `ema_params`.
 - Có hỗ trợ chọn metric tốt nhất (`quick_fid_4096` hoặc `val_loss`) và upload HF tùy chọn.
+- Upload HF:
+  - Lần upload đầu sẽ tự tạo repo model nếu chưa tồn tại.
+  - Nếu `--hf_repo_id` rỗng, repo đích sẽ là `{hf_username}/{hf_repo_name}`.
+  - Mỗi lần có best mới sẽ upload theo path có timestamp UTC, ví dụ:
+    `run_name/best/step_<step>_YYYYMMDD-HHMMSS-UTC`.
+  - Cần `HF_TOKEN` có quyền write.

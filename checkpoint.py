@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 import jax
@@ -119,30 +120,59 @@ class BestMetricTracker:
         print(f"[best] New best {self.metric_name} = {metric_value:.4f} at step {step}")
 
         # Save best checkpoint
-        save_checkpoint(state, self.config, step, ckpt_dir=self.best_dir)
+        best_save_dir = save_checkpoint(state, self.config, step, ckpt_dir=self.best_dir)
 
-        # Optional HF upload
-        if self.config.hf_repo_id:
-            self._upload_to_hf()
+        # Optional HF upload (auto-create repo supported)
+        if self.config.hf_repo_id or self.config.hf_username:
+            self._upload_to_hf(step=step, metric_value=metric_value, folder_path=best_save_dir)
 
         return True
 
-    def _upload_to_hf(self):
-        """Upload best checkpoint to HuggingFace Hub."""
+    def _resolve_repo_id(self) -> str:
+        """Resolve HF repo id from explicit repo_id or username/repo_name."""
+        if self.config.hf_repo_id:
+            return self.config.hf_repo_id
+        if self.config.hf_username and self.config.hf_repo_name:
+            return f"{self.config.hf_username}/{self.config.hf_repo_name}"
+        return ""
+
+    def _upload_to_hf(self, *, step: int, metric_value: float, folder_path: str):
+        """Upload best checkpoint to HuggingFace Hub (create repo on first upload)."""
         token = os.environ.get("HF_TOKEN", "")
         if not token:
             print("[best] HF_TOKEN not set, skipping upload.")
+            return
+
+        repo_id = self._resolve_repo_id()
+        if not repo_id:
+            print("[best] Missing HF repo target. Set --hf_repo_id or (--hf_username + --hf_repo_name).")
             return
 
         try:
             from huggingface_hub import HfApi
 
             api = HfApi(token=token)
-            api.upload_folder(
-                folder_path=self.best_dir,
-                repo_id=self.config.hf_repo_id,
+            api.create_repo(
+                repo_id=repo_id,
                 repo_type="model",
+                private=self.config.hf_private,
+                exist_ok=True,
             )
-            print(f"[best] Uploaded to HF: {self.config.hf_repo_id}")
+
+            ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-UTC")
+            path_in_repo = f"{self.config.run_name}/best/step_{step}_{ts}"
+            commit_message = (
+                f"best {self.metric_name}={metric_value:.6f} "
+                f"step={step} at {ts}"
+            )
+
+            api.upload_folder(
+                folder_path=folder_path,
+                repo_id=repo_id,
+                repo_type="model",
+                path_in_repo=path_in_repo,
+                commit_message=commit_message,
+            )
+            print(f"[best] Uploaded to HF: {repo_id}/{path_in_repo}")
         except Exception as e:
             print(f"[best] HF upload failed: {e}")
