@@ -271,6 +271,10 @@ class CrossAttentionPredictor(nn.Module):
 
         Returns: h_pred (B, N, D) — gated to target tokens only
         """
+        # Clamp mask to [0,1] and replace NaN/Inf to avoid invalid attention masks.
+        mask = jnp.nan_to_num(mask, nan=0.0, posinf=1.0, neginf=0.0)
+        mask = jnp.clip(mask, 0.0, 1.0)
+
         # Q: only target tokens contribute (gated by mask)
         Q = (h_stu + pos_embed) * mask[..., None]  # (B, N, D)
 
@@ -283,6 +287,9 @@ class CrossAttentionPredictor(nn.Module):
         # Attention mask: allow only context keys (1-M)
         # context_mask True = attend, False = masked
         context_mask = (1.0 - mask).astype(jnp.bool_)  # (B, N)
+        has_context = jnp.any(context_mask, axis=-1, keepdims=True)  # (B, 1)
+        # Fallback: if a sample has no context token, allow all keys to avoid NaN softmax.
+        context_mask = jnp.where(has_context, context_mask, jnp.ones_like(context_mask))
         attn_mask = context_mask[:, None, None, :]  # (B, 1, 1, N)
 
         h_pred = nn.MultiHeadDotProductAttention(

@@ -75,7 +75,7 @@ def train_step_baseline(state, batch, config_static):
     step_rng = jax.random.fold_in(state.rng, jax.lax.axis_index("batch"))
     rng_aug, rng_t, rng_noise, rng_label, rng_next = jax.random.split(step_rng, 5)
 
-    z0 = batch["latent"]
+    z0 = jnp.nan_to_num(batch["latent"], nan=0.0, posinf=1e4, neginf=-1e4)
     y = batch["label"]
     B = z0.shape[0]
 
@@ -152,7 +152,7 @@ def train_step_jepa(state, batch, config_static):
         jax.random.split(step_rng, 7)
     )
 
-    z0 = batch["latent"]
+    z0 = jnp.nan_to_num(batch["latent"], nan=0.0, posinf=1e4, neginf=-1e4)
     y = batch["label"]
     B = z0.shape[0]
     p = config_static.patch_size
@@ -176,8 +176,19 @@ def train_step_jepa(state, batch, config_static):
     tau_max = jnp.maximum(t, s)
 
     # --- Token mask M_tok: (B, N) ---
-    mask_ratio = config_static.mask_ratio
+    mask_ratio = jnp.clip(config_static.mask_ratio, 0.0, 1.0)
     M_tok = (jax.random.uniform(rng_mask, (B, N)) < mask_ratio).astype(jnp.float32)
+    if N == 1:
+        # With one token, there is no separate context set; disable target mask for stability.
+        M_tok = jnp.zeros_like(M_tok)
+    else:
+        target_count = jnp.sum(M_tok, axis=1, keepdims=True)
+        no_target = target_count == 0
+        all_target = target_count == N
+        first_col = M_tok[:, :1]
+        first_col = jnp.where(no_target, jnp.ones_like(first_col), first_col)
+        first_col = jnp.where(all_target, jnp.zeros_like(first_col), first_col)
+        M_tok = M_tok.at[:, :1].set(first_col)
 
     # --- Build M_lat from M_tok (patch-aligned upsample) ---
     M_2d = M_tok.reshape(B, gh, gw)

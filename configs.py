@@ -135,8 +135,8 @@ class Config:
         parser.add_argument("--lambda_jepa", type=float, default=0.1)
         parser.add_argument("--ema_decay", type=float, default=0.999)
         parser.add_argument("--mask_ratio", type=float, default=0.25)
-        parser.add_argument("--student_layer", type=int, default=4)
-        parser.add_argument("--teacher_layer", type=int, default=8)
+        parser.add_argument("--student_layer", type=int, default=3)
+        parser.add_argument("--teacher_layer", type=int, default=7)
 
         # Eval / Sampling
         parser.add_argument("--cfg_scale", type=float, default=1.0)
@@ -160,7 +160,8 @@ class Config:
                             choices=["quick_fid_4096", "val_loss"])
         parser.add_argument("--hf_repo_id", type=str, default="")
         parser.add_argument("--hf_username", type=str, default="Bangchis")
-        parser.add_argument("--hf_repo_name", type=str, default="soft-jepa-flow")
+        parser.add_argument("--hf_repo_name", type=str,
+                            default="soft-jepa-flow")
         parser.add_argument("--hf_private", action="store_true")
 
         args = parser.parse_args()
