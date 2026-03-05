@@ -101,7 +101,7 @@ class Config:
 
         # Data
         parser.add_argument("--data_dir", type=str,
-                            default="/kaggle/input/miniimagenet256-latents-arrayrecord-sdvae")
+                            default="/kaggle/input/datasets/bangchi/miniimagenet256-latents-arrayrecord-sdvae")
         parser.add_argument("--num_classes", type=int, default=100)
 
         # Model
