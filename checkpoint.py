@@ -22,15 +22,8 @@ def save_checkpoint(state, config: Config, step: int, ckpt_dir: str | None = Non
     if ckpt_dir is None:
         ckpt_dir = config.ckpt_dir
 
+    os.makedirs(ckpt_dir, exist_ok=True)
     save_dir = os.path.join(ckpt_dir, f"step_{step}")
-    if os.path.exists(save_dir):
-        ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-UTC")
-        save_dir = os.path.join(ckpt_dir, f"step_{step}_{ts}")
-        print(
-            f"[ckpt] step_{step} already exists. "
-            f"Saving to fallback dir: {save_dir}"
-        )
-    os.makedirs(save_dir, exist_ok=False)
 
     # Unreplicate state for saving (take device 0)
     from flax import jax_utils
@@ -45,7 +38,28 @@ def save_checkpoint(state, config: Config, step: int, ckpt_dir: str | None = Non
     }
 
     checkpointer = ocp.PyTreeCheckpointer()
-    checkpointer.save(save_dir, ckpt_data)
+    # Orbax requires destination not to exist. Do not pre-create save_dir.
+    # Retry with unique suffix if the target already exists (e.g. rerun/race).
+    save_attempt_dir = save_dir
+    for attempt in range(5):
+        try:
+            checkpointer.save(save_attempt_dir, ckpt_data)
+            save_dir = save_attempt_dir
+            break
+        except ValueError as e:
+            if "already exists" not in str(e):
+                raise
+            ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-UTC")
+            save_attempt_dir = os.path.join(
+                ckpt_dir, f"step_{step}_{ts}_p{os.getpid()}_a{attempt+1}"
+            )
+            print(
+                f"[ckpt] Destination exists, retrying with: {save_attempt_dir}"
+            )
+    else:
+        raise RuntimeError(
+            f"Failed to save checkpoint for step {step}: destination keeps colliding."
+        )
 
     # Save config alongside
     config_path = os.path.join(save_dir, "config.json")
