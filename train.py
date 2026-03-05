@@ -8,12 +8,15 @@ Usage:
 
 from __future__ import annotations
 
+import time
+
 import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
 from flax import jax_utils
 from flax.training import common_utils
+from tqdm.auto import tqdm
 
 from configs import Config
 from data import create_loader
@@ -162,11 +165,22 @@ def main():
 
     print(f"[train] Starting {config.mode} training for {config.steps} steps...")
 
+    remaining_steps = max(0, config.steps - start_step)
+    pbar = tqdm(
+        total=remaining_steps,
+        desc=f"train[{config.mode}]",
+        dynamic_ncols=True,
+        unit="step",
+    )
+
     for step, sharded_batch in enumerate(prefetcher, start=start_step + 1):
         if step > config.steps:
             break
 
+        step_start = time.perf_counter()
         state, metrics = train_step_fn(state, sharded_batch, config_static_rep)
+        step_time = time.perf_counter() - step_start
+        pbar.update(1)
 
         # --- Periodic logging ---
         if step % config.log_every == 0:
@@ -174,6 +188,10 @@ def main():
             log_metrics(metrics_cpu, step, prefix="train")
             log_nan_inf_counts(metrics_cpu, step)
             print(f"  step {step}: {metrics_cpu}")
+            pbar.set_postfix(
+                l_total=f"{metrics_cpu.get('l_total', float('nan')):.4f}",
+                step_s=f"{step_time:.3f}",
+            )
 
         # --- Sample grid ---
         if step % config.sample_every == 0:
@@ -228,6 +246,7 @@ def main():
         if step % config.ckpt_every == 0:
             save_checkpoint(state, config, step)
 
+    pbar.close()
     print("[train] Training complete.")
 
 
@@ -236,6 +255,13 @@ def run_validation(state, val_loader, config: Config, num_devices: int) -> dict:
     total_metrics = {}
     count = 0
     state_single = jax_utils.unreplicate(state)
+    val_pbar = tqdm(
+        total=50,
+        desc=f"val[{config.mode}]",
+        dynamic_ncols=True,
+        leave=False,
+        unit="batch",
+    )
 
     for batch in val_loader:
         batch_jax = jax.tree.map(lambda x: jnp.array(x), batch)
@@ -313,9 +339,12 @@ def run_validation(state, val_loader, config: Config, num_devices: int) -> dict:
         for k, v in batch_metrics.items():
             total_metrics[k] = total_metrics.get(k, 0.0) + v
         count += 1
+        val_pbar.update(1)
+        val_pbar.set_postfix(l_total=f"{batch_metrics.get('l_total', float('nan')):.4f}")
 
         if count >= 50:  # Cap val batches for speed
             break
+    val_pbar.close()
 
     if count > 0:
         total_metrics = {k: v / count for k, v in total_metrics.items()}

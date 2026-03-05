@@ -23,7 +23,14 @@ def save_checkpoint(state, config: Config, step: int, ckpt_dir: str | None = Non
         ckpt_dir = config.ckpt_dir
 
     save_dir = os.path.join(ckpt_dir, f"step_{step}")
-    os.makedirs(save_dir, exist_ok=True)
+    if os.path.exists(save_dir):
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-UTC")
+        save_dir = os.path.join(ckpt_dir, f"step_{step}_{ts}")
+        print(
+            f"[ckpt] step_{step} already exists. "
+            f"Saving to fallback dir: {save_dir}"
+        )
+    os.makedirs(save_dir, exist_ok=False)
 
     # Unreplicate state for saving (take device 0)
     from flax import jax_utils
@@ -47,7 +54,7 @@ def save_checkpoint(state, config: Config, step: int, ckpt_dir: str | None = Non
 
     # Update "latest" symlink
     latest_path = os.path.join(ckpt_dir, "latest")
-    if os.path.islink(latest_path):
+    if os.path.lexists(latest_path):
         os.unlink(latest_path)
     os.symlink(os.path.abspath(save_dir), latest_path)
 

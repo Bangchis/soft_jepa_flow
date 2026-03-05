@@ -15,6 +15,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from PIL import Image
+from tqdm.auto import tqdm
 
 from sample import euler_sample
 from vae_decode import decode_latents_nhwc
@@ -25,7 +26,11 @@ from inception_fid import get_fid_network, fid_from_stats
 # Image preprocessing for Inception
 # -------------------------------------------------------------------------
 
-def _prepare_for_inception(images_01: np.ndarray) -> np.ndarray:
+def _prepare_for_inception(
+    images_01: np.ndarray,
+    show_progress: bool = False,
+    progress_desc: str = "fid-resize",
+) -> np.ndarray:
     """Resize and rescale decoded images for InceptionV3.
 
     Args:
@@ -35,7 +40,17 @@ def _prepare_for_inception(images_01: np.ndarray) -> np.ndarray:
         (N, 299, 299, 3) float32 in [-1, 1]
     """
     out = []
-    for img in images_01:
+    img_iter = images_01
+    if show_progress:
+        img_iter = tqdm(
+            images_01,
+            total=len(images_01),
+            desc=progress_desc,
+            dynamic_ncols=True,
+            leave=False,
+            unit="img",
+        )
+    for img in img_iter:
         pil_img = Image.fromarray((np.clip(img, 0, 1) * 255).astype(np.uint8))
         pil_img = pil_img.resize((299, 299), Image.BICUBIC)
         arr = np.array(pil_img).astype(np.float32) / 255.0
@@ -59,7 +74,12 @@ def _get_inception_fn():
     return _inception_fn
 
 
-def inception_activations(images_m1p1: np.ndarray, batch_size: int = 64) -> np.ndarray:
+def inception_activations(
+    images_m1p1: np.ndarray,
+    batch_size: int = 64,
+    show_progress: bool = False,
+    progress_desc: str = "fid-inception",
+) -> np.ndarray:
     """Extract 2048-dim InceptionV3 activations.
 
     Args:
@@ -73,8 +93,18 @@ def inception_activations(images_m1p1: np.ndarray, batch_size: int = 64) -> np.n
     num_devices = jax.local_device_count()
     N = len(images_m1p1)
     all_acts = []
+    batch_indices = range(0, N, batch_size)
+    if show_progress:
+        batch_indices = tqdm(
+            batch_indices,
+            total=(N + batch_size - 1) // batch_size,
+            desc=progress_desc,
+            dynamic_ncols=True,
+            leave=False,
+            unit="batch",
+        )
 
-    for i in range(0, N, batch_size):
+    for i in batch_indices:
         batch = images_m1p1[i : i + batch_size]
         cur_bs = len(batch)
 
@@ -123,6 +153,13 @@ def load_or_compute_real_stats(val_loader, config) -> tuple[np.ndarray, np.ndarr
     # Collect val latents (deterministic order, no shuffle)
     latents = []
     count = 0
+    collect_pbar = tqdm(
+        total=config.fid_n,
+        desc="[FID] real-latents",
+        dynamic_ncols=True,
+        leave=False,
+        unit="img",
+    )
     for batch in val_loader:
         batch_latents = np.array(batch["latent"])  # (B, 32, 32, 4)
         for lat in batch_latents:
@@ -130,19 +167,35 @@ def load_or_compute_real_stats(val_loader, config) -> tuple[np.ndarray, np.ndarr
                 break
             latents.append(lat)
             count += 1
+            collect_pbar.update(1)
         if count >= config.fid_n:
             break
+    collect_pbar.close()
 
     latents = np.stack(latents[:config.fid_n])  # (fid_n, 32, 32, 4)
 
     # Decode via SD-VAE (CPU)
-    images_01 = decode_latents_nhwc(latents, batch_size=config.fid_decode_batch)
+    images_01 = decode_latents_nhwc(
+        latents,
+        batch_size=config.fid_decode_batch,
+        show_progress=True,
+        progress_desc="[FID] decode-real",
+    )
 
     # Prepare for Inception
-    images_m1p1 = _prepare_for_inception(images_01)
+    images_m1p1 = _prepare_for_inception(
+        images_01,
+        show_progress=True,
+        progress_desc="[FID] resize-real",
+    )
 
     # Inception activations
-    acts = inception_activations(images_m1p1, batch_size=config.fid_inception_batch)
+    acts = inception_activations(
+        images_m1p1,
+        batch_size=config.fid_inception_batch,
+        show_progress=True,
+        progress_desc="[FID] inception-real",
+    )
     mu, sigma = compute_stats(acts)
 
     # Save cache
@@ -188,6 +241,13 @@ def compute_fid(
     gen_batch_size = min(64, config.fid_n)
     all_latents = []
     count = 0
+    gen_pbar = tqdm(
+        total=config.fid_n,
+        desc="[FID] sample-fake",
+        dynamic_ncols=True,
+        leave=False,
+        unit="img",
+    )
 
     while count < config.fid_n:
         rng, sample_rng, label_rng = jax.random.split(rng, 3)
@@ -202,17 +262,33 @@ def compute_fid(
         )
         all_latents.append(np.array(z_0))
         count += n
+        gen_pbar.update(n)
+    gen_pbar.close()
 
     fake_latents = np.concatenate(all_latents, axis=0)[:config.fid_n]
 
     # Decode via SD-VAE (CPU)
-    fake_images_01 = decode_latents_nhwc(fake_latents, batch_size=config.fid_decode_batch)
+    fake_images_01 = decode_latents_nhwc(
+        fake_latents,
+        batch_size=config.fid_decode_batch,
+        show_progress=True,
+        progress_desc="[FID] decode-fake",
+    )
 
     # Prepare for Inception
-    fake_images_m1p1 = _prepare_for_inception(fake_images_01)
+    fake_images_m1p1 = _prepare_for_inception(
+        fake_images_01,
+        show_progress=True,
+        progress_desc="[FID] resize-fake",
+    )
 
     # Inception activations
-    acts_fake = inception_activations(fake_images_m1p1, batch_size=config.fid_inception_batch)
+    acts_fake = inception_activations(
+        fake_images_m1p1,
+        batch_size=config.fid_inception_batch,
+        show_progress=True,
+        progress_desc="[FID] inception-fake",
+    )
     mu_fake, sigma_fake = compute_stats(acts_fake)
 
     fid = float(fid_from_stats(mu_fake, sigma_fake, mu_real, sigma_real))

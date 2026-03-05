@@ -7,6 +7,7 @@ Lazy-loads model on first call; subsequent calls reuse the cached model.
 from __future__ import annotations
 
 import numpy as np
+from tqdm.auto import tqdm
 
 _vae = None
 _torch = None
@@ -34,6 +35,8 @@ def decode_latents_nhwc(
     latents_nhwc: np.ndarray,
     scaling_factor: float = 0.18215,
     batch_size: int = 32,
+    show_progress: bool = False,
+    progress_desc: str = "vae-decode",
 ) -> np.ndarray:
     """Decode latents to RGB images via SD-VAE on CPU.
 
@@ -41,6 +44,8 @@ def decode_latents_nhwc(
         latents_nhwc: (N, 32, 32, 4) float32 scaled latents (as stored in training)
         scaling_factor: VAE scaling factor (0.18215 for sd-vae-ft-mse)
         batch_size: sub-batch size to limit CPU memory
+        show_progress: enable tqdm progress bar
+        progress_desc: tqdm label when show_progress=True
 
     Returns:
         (N, 256, 256, 3) float32 images in [0, 1]
@@ -50,8 +55,18 @@ def decode_latents_nhwc(
     vae = _get_vae()
     N = latents_nhwc.shape[0]
     all_images = []
+    step_indices = range(0, N, batch_size)
+    if show_progress:
+        step_indices = tqdm(
+            step_indices,
+            total=(N + batch_size - 1) // batch_size,
+            desc=progress_desc,
+            dynamic_ncols=True,
+            leave=False,
+            unit="batch",
+        )
 
-    for i in range(0, N, batch_size):
+    for i in step_indices:
         batch_np = latents_nhwc[i : i + batch_size]
 
         # NHWC → NCHW, unscale
