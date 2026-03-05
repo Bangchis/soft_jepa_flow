@@ -394,9 +394,10 @@ def run_validation(state, val_loader, config: Config, num_devices: int) -> dict:
             h_target = out_tea["h_target"]
 
             l_gen = float(jnp.mean((v_pred - v_target) ** 2))
-            h_pred_norm = h_pred / (jnp.linalg.norm(h_pred, axis=-1, keepdims=True) + 1e-8)
-            h_tgt_norm = h_target / (jnp.linalg.norm(h_target, axis=-1, keepdims=True) + 1e-8)
-            cos_sim = jnp.sum(h_pred_norm * h_tgt_norm, axis=-1)
+            h2 = jnp.sum(h_pred * h_pred, axis=-1)
+            t2 = jnp.sum(h_target * h_target, axis=-1)
+            denom = jnp.sqrt(jnp.maximum(h2 * t2, 1e-6))
+            cos_sim = jnp.clip(jnp.sum(h_pred * h_target, axis=-1) / denom, -1.0, 1.0)
             l_repa = float(1.0 - jnp.sum(M_tok * cos_sim) / (jnp.sum(M_tok) + 1e-8))
             l_total = l_gen + config.lambda_jepa * l_repa
             batch_metrics = {"l_gen": l_gen, "l_repa": l_repa, "l_total": l_total}

@@ -14,6 +14,23 @@ import jax.numpy as jnp
 
 from augment import augment_latents
 
+_COS_EPS = 1e-3
+_GRAD_CLIP_NORM = 1.0
+
+
+def _global_norm(tree):
+    leaves = jax.tree.leaves(tree)
+    return jnp.sqrt(sum(jnp.sum(jnp.square(x)) for x in leaves) + 1e-12)
+
+
+def _safe_cosine(a: jax.Array, b: jax.Array) -> jax.Array:
+    """Numerically stable cosine similarity on last dim."""
+    a2 = jnp.sum(a * a, axis=-1)
+    b2 = jnp.sum(b * b, axis=-1)
+    denom = jnp.sqrt(jnp.maximum(a2 * b2, _COS_EPS * _COS_EPS))
+    cos = jnp.sum(a * b, axis=-1) / denom
+    return jnp.clip(cos, -1.0, 1.0)
+
 
 # -------------------------------------------------------------------------
 # Timestep sampling: lognormal (default) or uniform
@@ -230,9 +247,7 @@ def train_step_jepa(state, batch, config_static):
         l_gen = jnp.mean((v_pred - v_target) ** 2)
 
         # L_JEPA: 1 - cosine similarity, weighted by M_tok (target tokens)
-        h_pred_norm = h_pred / (jnp.linalg.norm(h_pred, axis=-1, keepdims=True) + 1e-8)
-        h_tgt_norm = h_target / (jnp.linalg.norm(h_target, axis=-1, keepdims=True) + 1e-8)
-        cos_sim = jnp.sum(h_pred_norm * h_tgt_norm, axis=-1)  # (B, N)
+        cos_sim = _safe_cosine(h_pred, h_target)  # (B, N)
 
         l_jepa = 1.0 - jnp.sum(M_tok * cos_sim) / (jnp.sum(M_tok) + 1e-8)
 
@@ -273,7 +288,12 @@ def train_step_jepa(state, batch, config_static):
 
     # Sync across devices
     grads = jax.lax.pmean(grads, axis_name="batch")
+    grad_norm = _global_norm(grads)
+    grad_scale = jnp.minimum(1.0, _GRAD_CLIP_NORM / (grad_norm + 1e-6))
+    grads = jax.tree.map(lambda g: g * grad_scale, grads)
     metrics = jax.lax.pmean(metrics, axis_name="batch")
+    metrics["dbg_grad_norm"] = grad_norm
+    metrics["dbg_grad_scale"] = grad_scale
 
     state = state.apply_gradients(grads)
 
