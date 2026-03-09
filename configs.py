@@ -57,6 +57,10 @@ class Config:
     jepa2_alpha_lo: float = 1.4
     jepa2_alpha_hi: float = 2.0
     jepa2_sigreg_slices: int = 512
+    jepa2_sigreg_sigma: float = 1.0
+    jepa2_sigreg_num_points: int = 17
+    jepa2_sigreg_domain_lo: float = -5.0
+    jepa2_sigreg_domain_hi: float = 5.0
 
     # --- Eval / Sampling ---
     cfg_scale: float = 2.0
@@ -157,6 +161,10 @@ class Config:
         parser.add_argument("--jepa2_alpha_lo", type=float, default=1.4)
         parser.add_argument("--jepa2_alpha_hi", type=float, default=2.0)
         parser.add_argument("--jepa2_sigreg_slices", type=int, default=512)
+        parser.add_argument("--jepa2_sigreg_sigma", type=float, default=1.0)
+        parser.add_argument("--jepa2_sigreg_num_points", type=int, default=17)
+        parser.add_argument("--jepa2_sigreg_domain_lo", type=float, default=-5.0)
+        parser.add_argument("--jepa2_sigreg_domain_hi", type=float, default=5.0)
 
         # Eval / Sampling
         parser.add_argument("--cfg_scale", type=float, default=1.0)

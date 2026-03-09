@@ -1,6 +1,6 @@
 # Soft-JEPA-Flow (JAX/Flax, TPU-friendly)
 
-This repository trains a latent generative model in two modes:
+This repository trains a latent generative model in three modes:
 
 1. `baseline`: DiT + rectified flow / flow matching.
 2. `jepa`: baseline objective + JEPA representation loss (student/EMA-teacher + cross-attention predictor).
@@ -23,8 +23,9 @@ This README reflects the current codebase status, especially:
   - Inception is vendored (`inception_fid.py`) and used in the FID pipeline.
 - Pseudo-RGB sample logging has been removed.
   - `logging_utils.log_sample_grid` now decodes real RGB via SD-VAE.
-- JEPA validation path is integrated in `run_validation`.
+- JEPA/JEPA2 validation paths are integrated in `run_validation`.
   - In JEPA mode, validation logs `L_gen`, `L_repa`, and `L_total`.
+  - In JEPA2 mode, validation logs `L_gen`, `L_jepa`, `L_sig`, and `L_total`.
 - Standalone inference script is now available.
   - `infer.py` supports loading checkpoints and running sampling/optional decode outside `train.py`.
 
@@ -120,7 +121,7 @@ Sampling uses Euler ODE integration in latent space:
 - integrate to `t=0` for `sample_steps`
 - CFG uses conditional and unconditional passes with `cfg_scale`
 
-Important: sampling always uses `mode="baseline"` velocity head, including checkpoints trained in JEPA mode.
+Important: sampling always uses `mode="baseline"` velocity head, including checkpoints trained in `jepa` and `jepa2` modes.
 
 ### 4.2 Standalone inference (`infer.py`)
 
@@ -172,6 +173,7 @@ Real stats cache:
 `run_validation` is the active validation path:
 - `baseline`: logs `L_gen`, `L_total`
 - `jepa`: logs `L_gen`, `L_repa`, `L_total`
+- `jepa2`: logs `L_gen`, `L_jepa`, `L_sig`, `L_total`
 
 `L_repa` is the JEPA-like representation term computed from cosine similarity.
 
@@ -198,7 +200,7 @@ Behavior:
 - periodic save is controlled by `--ckpt_every`
 - Orbax destination collision is handled by retrying with timestamp suffix
 - `latest` symlink is updated after each save
-- strict restore is enforced for current full JEPA+teacher param tree
+- strict restore is enforced for the current mode-compatible full parameter tree
 
 Best checkpoint tracking:
 - metric: `quick_fid_4096` or `val_loss`
@@ -257,7 +259,34 @@ python train.py \
   --fid_decode_batch 32 --fid_inception_batch 64
 ```
 
-### 10.3 Inference from checkpoint
+### 10.3 JEPA2
+
+```bash
+python train.py \
+  --mode jepa2 \
+  --data_dir /kaggle/input/datasets/bangchi/miniimagenet256-latents-arrayrecord-sdvae \
+  --run_name jepa2_run \
+  --global_batch 256 \
+  --steps 200000 \
+  --opt adam --lr 1e-4 --beta1 0.9 --beta2 0.99 --weight_decay 0.0 \
+  --t_schedule lognormal --t_lognorm_mean -0.4 --t_lognorm_std 1.0 \
+  --lambda_jepa2 0.05 --jepa2_split_layer 4 \
+  --jepa2_mask_lo 0.2 --jepa2_mask_hi 0.4 \
+  --jepa2_t_shift 1.78 --jepa2_alpha_lo 1.4 --jepa2_alpha_hi 2.0 \
+  --jepa2_sigreg_slices 512 --jepa2_sigreg_sigma 1.0 \
+  --jepa2_sigreg_num_points 17 --jepa2_sigreg_domain_lo -5.0 --jepa2_sigreg_domain_hi 5.0 \
+  --cfg_scale 1.0 --sample_steps 50 \
+  --fid_n 4096 --fid_cache_path checkpoints/fid_real_stats_4096.npz \
+  --fid_decode_batch 32 --fid_inception_batch 64
+```
+
+`jepa2` design notes:
+- no teacher network
+- no EMA teacher update
+- no stop-gradient branch
+- no `CrossAttentionPredictor`
+
+### 10.4 Inference from checkpoint
 
 Use `latest` (or fallback to newest `step_*` if `latest` is missing):
 
@@ -287,7 +316,7 @@ python infer.py \
 `train.py` uses `Config.from_args()`, so effective runtime defaults come from argparse in `configs.py`.
 
 ### Mode/Data
-- `--mode` = `baseline` (`baseline|jepa`)
+- `--mode` = `baseline` (`baseline|jepa|jepa2`)
 - `--data_dir` = `/kaggle/input/miniimagenet256-latents-arrayrecord-sdvae`
 - `--num_classes` = `100`
 
@@ -323,6 +352,20 @@ python infer.py \
 - `--student_layer` = `4`
 - `--teacher_layer` = `8`
 
+### JEPA2
+- `--lambda_jepa2` = `0.05`
+- `--jepa2_split_layer` = `4`
+- `--jepa2_mask_lo` = `0.2`
+- `--jepa2_mask_hi` = `0.4`
+- `--jepa2_t_shift` = `1.78`
+- `--jepa2_alpha_lo` = `1.4`
+- `--jepa2_alpha_hi` = `2.0`
+- `--jepa2_sigreg_slices` = `512`
+- `--jepa2_sigreg_sigma` = `1.0`
+- `--jepa2_sigreg_num_points` = `17`
+- `--jepa2_sigreg_domain_lo` = `-5.0`
+- `--jepa2_sigreg_domain_hi` = `5.0`
+
 ### Eval/Sampling/FID
 - `--cfg_scale` = `1.0`
 - `--sample_steps` = `50`
@@ -356,5 +399,4 @@ When you run `python train.py ...`, the actual defaults come from `Config.from_a
 
 1. SD-VAE decode on CPU can be a bottleneck for large `fid_n` or large decode batch.
 2. Inception weights in `inception_fid.py` are downloaded on first use.
-3. `infer.py` strict restore expects checkpoints compatible with the current full JEPA+teacher parameter tree.
-
+3. `infer.py` strict restore expects checkpoints compatible with the current mode-compatible parameter tree.

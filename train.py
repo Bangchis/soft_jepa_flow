@@ -77,6 +77,10 @@ def make_config_static(config: Config) -> StaticConfig:
         jepa2_alpha_lo=config.jepa2_alpha_lo,
         jepa2_alpha_hi=config.jepa2_alpha_hi,
         jepa2_sigreg_slices=config.jepa2_sigreg_slices,
+        jepa2_sigreg_sigma=config.jepa2_sigreg_sigma,
+        jepa2_sigreg_num_points=config.jepa2_sigreg_num_points,
+        jepa2_sigreg_domain_lo=config.jepa2_sigreg_domain_lo,
+        jepa2_sigreg_domain_hi=config.jepa2_sigreg_domain_hi,
         hidden_size=config.hidden_size,
     )
 
@@ -439,8 +443,15 @@ def run_validation(state, val_loader, config: Config, num_devices: int) -> dict:
             l_jepa = float(jnp.mean(1.0 - jnp.sum(r_t_n * r_s_n, axis=-1)))
 
             # SIGReg (single device, use local batch)
-            l_sig = float(_cls_sigreg_loss(r_s, r_t, rng_sig,
-                                           num_slices=config.jepa2_sigreg_slices))
+            l_sig = float(_cls_sigreg_loss(
+                r_s,
+                r_t,
+                rng_sig,
+                num_slices=config.jepa2_sigreg_slices,
+                sigma=config.jepa2_sigreg_sigma,
+                num_points=config.jepa2_sigreg_num_points,
+                domain=(config.jepa2_sigreg_domain_lo, config.jepa2_sigreg_domain_hi),
+            ))
 
             l_total = l_gen + config.lambda_jepa2 * (l_jepa + l_sig)
             batch_metrics = {"l_gen": l_gen, "l_jepa": l_jepa, "l_sig": l_sig, "l_total": l_total}

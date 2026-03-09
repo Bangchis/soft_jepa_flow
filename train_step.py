@@ -57,6 +57,10 @@ class StaticConfig(NamedTuple):
     jepa2_alpha_lo: float = 1.4
     jepa2_alpha_hi: float = 2.0
     jepa2_sigreg_slices: int = 512
+    jepa2_sigreg_sigma: float = 1.0
+    jepa2_sigreg_num_points: int = 17
+    jepa2_sigreg_domain_lo: float = -5.0
+    jepa2_sigreg_domain_hi: float = 5.0
     hidden_size: int = 768
 
 
@@ -358,14 +362,29 @@ def _epps_pulley_1d(y, sigma=1.0):
     return term1 - term2 + term3
 
 
-def _sigreg_loss(R, rng, num_slices=512, sigma=1.0):
+def _sigreg_loss(
+    R,
+    rng,
+    num_slices=512,
+    sigma=1.0,
+    num_points=17,
+    domain=(-5.0, 5.0),
+):
     """SIGReg loss via sliced Epps-Pulley.
 
     R: (B_global, D) batch CLS embeddings.
+    num_points/domain are kept as explicit configs for paper-compatible
+    SIGReg settings, even though the closed-form EP statistic itself
+    does not require quadrature points.
     Returns scalar.
     """
     R = R.astype(jnp.float32)
     B, D = R.shape
+    domain_lo, domain_hi = domain
+    if domain_hi <= domain_lo:
+        raise ValueError(f"Invalid SIGReg domain: ({domain_lo}, {domain_hi})")
+    if num_points < 2:
+        raise ValueError(f"SIGReg num_points must be >= 2, got {num_points}")
 
     # Center and standardize per dimension
     mean = jnp.mean(R, axis=0, keepdims=True)
@@ -379,16 +398,40 @@ def _sigreg_loss(R, rng, num_slices=512, sigma=1.0):
     # Project: (B, Q)
     Y = Rn @ A.T
 
-    # vmap Epps-Pulley over slices (columns of Y)
+    # Closed-form EP on slices. Keep a quadrature grid for config parity
+    # with paper settings (num_points/domain) and future numerical variants.
+    _ = jnp.linspace(domain_lo, domain_hi, num_points, dtype=jnp.float32)
     ep_vals = jax.vmap(lambda col: _epps_pulley_1d(col, sigma=sigma), in_axes=1)(Y)
     return jnp.mean(ep_vals)
 
 
-def _cls_sigreg_loss(r_s, r_t, rng, num_slices=512):
+def _cls_sigreg_loss(
+    r_s,
+    r_t,
+    rng,
+    num_slices=512,
+    sigma=1.0,
+    num_points=17,
+    domain=(-5.0, 5.0),
+):
     """SIGReg on both CLS views: 0.5 * SIGReg(r_s) + 0.5 * SIGReg(r_t)."""
     rng1, rng2 = jax.random.split(rng)
-    loss_s = _sigreg_loss(r_s, rng1, num_slices=num_slices)
-    loss_t = _sigreg_loss(r_t, rng2, num_slices=num_slices)
+    loss_s = _sigreg_loss(
+        r_s,
+        rng1,
+        num_slices=num_slices,
+        sigma=sigma,
+        num_points=num_points,
+        domain=domain,
+    )
+    loss_t = _sigreg_loss(
+        r_t,
+        rng2,
+        num_slices=num_slices,
+        sigma=sigma,
+        num_points=num_points,
+        domain=domain,
+    )
     return 0.5 * (loss_s + loss_t)
 
 
@@ -517,6 +560,12 @@ def train_step_jepa2(state, batch, config_static):
         l_sig = _cls_sigreg_loss(
             r_s_global, r_t_global, rng_sig,
             num_slices=config_static.jepa2_sigreg_slices,
+            sigma=config_static.jepa2_sigreg_sigma,
+            num_points=config_static.jepa2_sigreg_num_points,
+            domain=(
+                config_static.jepa2_sigreg_domain_lo,
+                config_static.jepa2_sigreg_domain_hi,
+            ),
         )
 
         lam = config_static.lambda_jepa2
