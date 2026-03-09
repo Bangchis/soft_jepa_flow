@@ -153,7 +153,7 @@ class Config:
         parser.add_argument("--teacher_layer", type=int, default=7)
 
         # JEPA2-specific
-        parser.add_argument("--lambda_jepa2", type=float, default=0.1)
+        parser.add_argument("--lambda_jepa2", type=float, default=1)
         parser.add_argument("--jepa2_split_layer", type=int, default=4)
         parser.add_argument("--jepa2_mask_lo", type=float, default=0.2)
         parser.add_argument("--jepa2_mask_hi", type=float, default=0.4)
