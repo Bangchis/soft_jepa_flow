@@ -25,7 +25,8 @@ from dit import JepaDiT
 from train_state import TrainState
 from train_step import (
     StaticConfig, train_step_baseline, train_step_jepa, train_step_jepa2,
-    _sample_t_logit_normal_shifted, _build_variable_k_mask, _cls_sigreg_loss,
+    _sample_t_logit_normal_shifted, _build_variable_k_mask,
+    _sigreg_loss, _cls_sigreg_loss,
 )
 from sample import sample_images
 from checkpoint import save_checkpoint, maybe_restore, BestMetricTracker
@@ -180,10 +181,8 @@ def main():
     dummy_y = jnp.zeros((per_device_batch, config.num_classes))
 
     if config.mode == "jepa2":
-        # JEPA2: init with mode="jepa2" to get cls_token param,
+        # JEPA2: init with mode="jepa2" to get readout params,
         # then merge with baseline init for sampling compatibility
-        D = config.hidden_size
-        dummy_cls = jnp.zeros((per_device_batch, 1, D))
         rng_j2, rng_bl = jax.random.split(param_rng)
 
         params_jepa2 = model_def.init(
@@ -191,7 +190,6 @@ def main():
             dummy_z, dummy_t, dummy_y,
             train=False, mode="jepa2",
             z_s=dummy_z, t_s=dummy_t,
-            cls_s_noised=dummy_cls, cls_t_noised=dummy_cls,
         )["params"]
 
         params_baseline = model_def.init(
@@ -377,7 +375,7 @@ def run_validation(state, val_loader, config: Config, num_devices: int) -> dict:
         sharded = shard_batch(batch_jax, num_devices)
 
         if config.mode == "jepa2":
-            # JEPA2 val: L_gen + L_jepa + L_sig + L_total
+            # JEPA2 val: L_gen (both views) + L_pred + L_sig + L_total
             z0 = sharded["latent"][0]
             y = sharded["label"][0]
             B = z0.shape[0]
@@ -388,8 +386,8 @@ def run_validation(state, val_loader, config: Config, num_devices: int) -> dict:
             D = config.hidden_size
 
             rng_base = jax.random.PRNGKey(count)
-            rng_t, rng_alpha, rng_noise, rng_noise_cls, rng_mask_r, rng_mask_s, rng_sig = (
-                jax.random.split(rng_base, 7)
+            rng_t, rng_alpha, rng_noise, rng_mask_r, rng_mask_s, rng_sig = (
+                jax.random.split(rng_base, 6)
             )
 
             # Timestep sampling
@@ -400,7 +398,6 @@ def run_validation(state, val_loader, config: Config, num_devices: int) -> dict:
             s_val = jnp.clip(t_val / alpha, 1e-5, 1.0 - 1e-5)
 
             z1 = jax.random.normal(rng_noise, z0.shape)
-            eps_reg = jax.random.normal(rng_noise_cls, (B, 1, D))
             v_target = z1 - z0
 
             # Variable mask
@@ -417,35 +414,26 @@ def run_validation(state, val_loader, config: Config, num_devices: int) -> dict:
             z_s = (1.0 - s_4d) * z0 + s_4d * z1
             z_mix = M_lat * z_t + (1.0 - M_lat) * z_s
 
-            # CLS tokens
-            c_reg = state_single.params['cls_token']  # (1, 1, D)
-            c_reg_b = jnp.broadcast_to(c_reg, (B, 1, D))
-            t_3d = t_val[:, None, None]
-            s_3d = s_val[:, None, None]
-            cls_t = (1.0 - t_3d) * c_reg_b + t_3d * eps_reg
-            cls_s = (1.0 - s_3d) * c_reg_b + s_3d * eps_reg
-
             out = state_single.apply_fn(
                 {"params": state_single.params}, z_mix, t_val, y,
                 train=False, mode="jepa2",
                 z_s=z_s, t_s=s_val,
-                cls_s_noised=cls_s, cls_t_noised=cls_t,
             )
-            v_pred = out["v_pred"]
-            r_s = out["r_s"]
-            r_t = out["r_t"]
+            v_pred_g = out["v_pred_g"]
+            v_pred_l = out["v_pred_l"]
+            z_g = out["z_g"]
+            z_l = out["z_l"]
 
-            l_gen = float(jnp.mean((v_pred - v_target) ** 2))
+            l_gen_g = float(jnp.mean((v_pred_g - v_target) ** 2))
+            l_gen_l = float(jnp.mean((v_pred_l - v_target) ** 2))
+            l_gen = 0.5 * (l_gen_g + l_gen_l)
 
-            # Cosine JEPA on CLS
-            r_t_n = r_t / (jnp.linalg.norm(r_t, axis=-1, keepdims=True) + 1e-8)
-            r_s_n = r_s / (jnp.linalg.norm(r_s, axis=-1, keepdims=True) + 1e-8)
-            l_jepa = float(jnp.mean(1.0 - jnp.sum(r_t_n * r_s_n, axis=-1)))
+            # L_pred: MSE between local and global readout embeddings
+            l_pred = float(jnp.mean((z_l - z_g) ** 2))
 
-            # SIGReg (single device, use local batch)
-            l_sig = float(_cls_sigreg_loss(
-                r_s,
-                r_t,
+            # SIGReg on global embeddings only
+            l_sig = float(_sigreg_loss(
+                z_g,
                 rng_sig,
                 num_slices=config.jepa2_sigreg_slices,
                 sigma=config.jepa2_sigreg_sigma,
@@ -453,8 +441,8 @@ def run_validation(state, val_loader, config: Config, num_devices: int) -> dict:
                 domain=(config.jepa2_sigreg_domain_lo, config.jepa2_sigreg_domain_hi),
             ))
 
-            l_total = l_gen + config.lambda_jepa2 * (0.95 * l_jepa + 0.05 * l_sig)
-            batch_metrics = {"l_gen": l_gen, "l_jepa": l_jepa, "l_sig": l_sig, "l_total": l_total}
+            l_total = l_gen + config.lambda_jepa2 * (0.95 * l_pred + 0.05 * l_sig)
+            batch_metrics = {"l_gen": l_gen, "l_pred": l_pred, "l_sig": l_sig, "l_total": l_total}
 
         elif config.mode == "baseline":
             # Simple forward pass for val loss

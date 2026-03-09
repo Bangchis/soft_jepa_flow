@@ -24,7 +24,7 @@ class Config:
     mlp_ratio: float = 4.0
 
     # --- Optimizer (kvfrans-compatible) ---
-    opt: str = "adam"  # "adam" | "adamw"
+    opt: str = "adamw"  # "adam" | "adamw"
     lr: float = 1e-4
     beta1: float = 0.9
     beta2: float = 0.99
@@ -53,7 +53,7 @@ class Config:
     jepa2_split_layer: int = 4
     jepa2_mask_lo: float = 0.2
     jepa2_mask_hi: float = 0.4
-    jepa2_t_shift: float = 1.78
+    jepa2_t_shift: float = 1
     jepa2_alpha_lo: float = 1.4
     jepa2_alpha_hi: float = 2.0
     jepa2_sigreg_slices: int = 512
@@ -74,9 +74,9 @@ class Config:
     # --- Logging / Checkpoint ---
     log_every: int = 1000
     eval_every: int = 5_000
-    sample_every: int = 40_000
+    sample_every: int = 10_000
     fid_every: int = 50_000
-    ckpt_every: int = 50_000
+    ckpt_every: int = 100_000
     run_name: str = "run"
     ckpt_dir: str = "checkpoints"
     best_metric: str = "quick_fid_4096"  # or "val_loss"
@@ -157,14 +157,16 @@ class Config:
         parser.add_argument("--jepa2_split_layer", type=int, default=4)
         parser.add_argument("--jepa2_mask_lo", type=float, default=0.2)
         parser.add_argument("--jepa2_mask_hi", type=float, default=0.4)
-        parser.add_argument("--jepa2_t_shift", type=float, default=1.78)
+        parser.add_argument("--jepa2_t_shift", type=float, default=1)
         parser.add_argument("--jepa2_alpha_lo", type=float, default=1.4)
         parser.add_argument("--jepa2_alpha_hi", type=float, default=2.0)
         parser.add_argument("--jepa2_sigreg_slices", type=int, default=512)
         parser.add_argument("--jepa2_sigreg_sigma", type=float, default=1.0)
         parser.add_argument("--jepa2_sigreg_num_points", type=int, default=17)
-        parser.add_argument("--jepa2_sigreg_domain_lo", type=float, default=-5.0)
-        parser.add_argument("--jepa2_sigreg_domain_hi", type=float, default=5.0)
+        parser.add_argument("--jepa2_sigreg_domain_lo",
+                            type=float, default=-5.0)
+        parser.add_argument("--jepa2_sigreg_domain_hi",
+                            type=float, default=5.0)
 
         # Eval / Sampling
         parser.add_argument("--cfg_scale", type=float, default=2.0)
@@ -181,7 +183,7 @@ class Config:
         parser.add_argument("--eval_every", type=int, default=5_000)
         parser.add_argument("--sample_every", type=int, default=10_000)
         parser.add_argument("--fid_every", type=int, default=50_000)
-        parser.add_argument("--ckpt_every", type=int, default=50_000)
+        parser.add_argument("--ckpt_every", type=int, default=100_000)
         parser.add_argument("--run_name", type=str, default="run")
         parser.add_argument("--ckpt_dir", type=str, default="checkpoints")
         parser.add_argument("--best_metric", type=str, default="quick_fid_4096",

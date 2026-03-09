@@ -70,12 +70,16 @@ class JepaDiT(nn.Module):
         self.teacher_head = TeacherHead(hidden_size=D)
         self.cross_attn_pred = CrossAttentionPredictor(hidden_size=D, num_heads=self.num_heads)
 
-        # JEPA2-specific: learnable CLS token
-        self.cls_token = self.param('cls_token', nn.initializers.normal(0.02), (1, 1, D))
+        # JEPA2-specific: learnable readout query + cross-attention
+        self.readout_query = self.param('readout_query', nn.initializers.normal(0.02), (1, 1, D))
+        self.readout_attn = nn.MultiHeadDotProductAttention(
+            num_heads=1,
+            qkv_features=D,
+            kernel_init=nn.initializers.xavier_uniform(),
+        )
 
     def __call__(self, x, t, y, *, train: bool = False, mode: str = "baseline",
                  mask=None, z_s=None, t_s=None,
-                 cls_s_noised=None, cls_t_noised=None,
                  debug_collect_act_rms: bool = False):
         """
         Args:
@@ -85,16 +89,14 @@ class JepaDiT(nn.Module):
             train: whether training (enables label dropout)
             mode:  "baseline" | "jepa" | "teacher" | "jepa2"
             mask:  (B, N) float32 {0,1} token mask — only used in "jepa" mode
-            z_s:   (B, 32, 32, 4) s-view latent — only used in "jepa2" mode
-            t_s:   (B,)           s-view timestep — only used in "jepa2" mode
-            cls_s_noised: (B, 1, D) noised CLS for s-view — only "jepa2"
-            cls_t_noised: (B, 1, D) noised CLS for t-view — only "jepa2"
+            z_s:   (B, 32, 32, 4) global view latent — only used in "jepa2" mode
+            t_s:   (B,)           global view timestep — only used in "jepa2" mode
 
         Returns dict with keys depending on mode:
             "baseline" → {"v_pred": (B, 32, 32, 4)}
             "jepa"     → {"v_pred": (B, 32, 32, 4), "h_pred": (B, N, D)}
             "teacher"  → {"h_target": (B, N, D)}
-            "jepa2"    → {"v_pred": (B, 32, 32, 4), "r_s": (B, D), "r_t": (B, D)}
+            "jepa2"    → {"v_pred_g": ..., "v_pred_l": ..., "z_g": (B,D), "z_l": (B,D)}
         """
         B = x.shape[0]
         H = W = self.latent_size
@@ -110,49 +112,50 @@ class JepaDiT(nn.Module):
         pos_embed = get_2d_sincos_pos_embed(self.hidden_size, grid)  # (1, N, D) np
         pos_embed = jax.lax.stop_gradient(jnp.array(pos_embed))
 
-        # --- JEPA2: dual-view split-depth forward ---
+        # --- JEPA2: dual-view full-depth forward with readout ---
         if mode == "jepa2":
-            # Patchify both views from raw spatial input
-            tokens_t = self.patch_embed(x) + pos_embed      # (B, N, D)
-            tokens_s = self.patch_embed(z_s) + pos_embed     # (B, N, D)
+            D = self.hidden_size
 
-            # Prepend noised CLS tokens
-            seq_t = jnp.concatenate([cls_t_noised, tokens_t], axis=1)  # (B, N+1, D)
-            seq_s = jnp.concatenate([cls_s_noised, tokens_s], axis=1)  # (B, N+1, D)
+            # Patchify both views
+            tokens_l = self.patch_embed(x) + pos_embed       # local (B, N, D)
+            tokens_g = self.patch_embed(z_s) + pos_embed     # global (B, N, D)
 
             # Conditioning: shared y_embed, different t_embed
             y_emb = self.y_embed(y, train=train)
-            c_t = self.t_embed(t) + y_emb       # (B, D)
-            c_s = self.t_embed(t_s) + y_emb     # (B, D)
+            c_l = self.t_embed(t) + y_emb        # local conditioned on heavier t
+            c_g = self.t_embed(t_s) + y_emb      # global conditioned on lighter s
 
             act_rms = [] if debug_collect_act_rms else None
-
-            # First split_layer blocks on BOTH views
+            h_g = h_l = None
             split = self.jepa2_split_layer
-            for i in range(split):
-                seq_t = self.blocks[i](seq_t, c_t)
-                seq_s = self.blocks[i](seq_s, c_s)
+
+            # Run ALL blocks on BOTH views, tap hidden at split_layer
+            for i in range(self.depth):
+                tokens_g = self.blocks[i](tokens_g, c_g)
+                tokens_l = self.blocks[i](tokens_l, c_l)
+                if i == split - 1:
+                    h_g = tokens_g   # (B, N, D)
+                    h_l = tokens_l   # (B, N, D)
                 if debug_collect_act_rms:
-                    act_rms.append(_rms(seq_t))
+                    act_rms.append(_rms(tokens_l))
 
-            # Extract CLS vectors
-            r_t = seq_t[:, 0, :]   # (B, D)
-            r_s = seq_s[:, 0, :]   # (B, D)
+            # FinalLayer on both views → velocity predictions
+            def _unpatchify(tokens, c):
+                x_out = self.final_layer(tokens, c)
+                x_out = x_out.reshape(B, grid, grid, p, p, C)
+                x_out = jnp.einsum("bhwpqc->bhpwqc", x_out)
+                return x_out.reshape(B, H, W, C)
 
-            # Continue only t-view through remaining blocks
-            for i in range(split, self.depth):
-                seq_t = self.blocks[i](seq_t, c_t)
-                if debug_collect_act_rms:
-                    act_rms.append(_rms(seq_t))
+            v_pred_g = _unpatchify(tokens_g, c_g)
+            v_pred_l = _unpatchify(tokens_l, c_l)
 
-            # FinalLayer on image tokens only (skip CLS at position 0)
-            img_tokens = seq_t[:, 1:, :]           # (B, N, D)
-            x_out = self.final_layer(img_tokens, c_t)  # (B, N, p*p*C)
-            x_out = x_out.reshape(B, grid, grid, p, p, C)
-            x_out = jnp.einsum("bhwpqc->bhpwqc", x_out)
-            v_pred = x_out.reshape(B, H, W, C)
+            # Readout: learnable query cross-attends into hidden maps
+            q = jnp.broadcast_to(self.readout_query, (B, 1, D))  # (B, 1, D)
+            z_g = self.readout_attn(q, h_g)[:, 0, :]  # (B, D)
+            z_l = self.readout_attn(q, h_l)[:, 0, :]  # (B, D)
 
-            out = {"v_pred": v_pred, "r_s": r_s, "r_t": r_t}
+            out = {"v_pred_g": v_pred_g, "v_pred_l": v_pred_l,
+                   "z_g": z_g, "z_l": z_l}
             if debug_collect_act_rms:
                 out["act_rms"] = jnp.stack(act_rms, axis=0)
             return out

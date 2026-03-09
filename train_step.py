@@ -354,26 +354,50 @@ def _build_variable_k_mask(rng_ratio, rng_scores, B, N, lo=0.2, hi=0.4):
     return mask, ratio, k
 
 
-def _epps_pulley_1d(y, sigma=1.0):
-    """Epps-Pulley 1D normality statistic.
+def _build_ep_quadrature_grid(num_points, domain):
+    """Build symmetric trapezoid quadrature for ECF-based Epps-Pulley.
 
-    y: (B,) float32  —  1D projections of batch embeddings.
-    Returns scalar.
+    Integrates over [0, t_max] with x2 symmetry factor, matching the
+    LeJEPA numerical ECF style while staying JAX-friendly.
+    """
+    domain_lo, domain_hi = domain
+    if domain_hi <= domain_lo:
+        raise ValueError(f"Invalid SIGReg domain: ({domain_lo}, {domain_hi})")
+    if num_points < 2:
+        raise ValueError(f"SIGReg num_points must be >= 2, got {num_points}")
+
+    t_max = float(max(abs(domain_lo), abs(domain_hi)))
+    t = jnp.linspace(0.0, t_max, num_points, dtype=jnp.float32)     # (K,)
+    dt = t_max / float(num_points - 1)
+    # Trapezoid on [0, t_max] with symmetry multiplier 2.
+    w = jnp.full((num_points,), 2.0 * dt, dtype=jnp.float32)
+    w = w.at[0].set(dt)
+    w = w.at[-1].set(dt)
+    return t, w
+
+
+def _ep_ecf_1d(y, t_grid, trap_weights):
+    """Numerical ECF Epps-Pulley statistic for one 1D projected sample.
+
+    y: (B,) float32
+    t_grid: (K,)
+    trap_weights: (K,)
     """
     y = y.astype(jnp.float32)
     B = y.shape[0]
 
-    diff = y[:, None] - y[None, :]                              # (B, B)
-    term1 = jnp.mean(jnp.exp(-(diff ** 2) / (2.0 * sigma ** 2)))
+    # Characteristic function moments over grid.
+    yt = y[:, None] * t_grid[None, :]                                # (B, K)
+    c_t = jnp.mean(jnp.cos(yt), axis=0)                              # (K,)
+    s_t = jnp.mean(jnp.sin(yt), axis=0)                              # (K,)
 
-    coeff2 = jnp.sqrt(sigma ** 2 / (sigma ** 2 + 1.0))
-    term2 = (2.0 / B) * coeff2 * jnp.sum(
-        jnp.exp(-(y ** 2) / (2.0 * (sigma ** 2 + 1.0)))
-    )
+    # Standard normal characteristic function.
+    phi_t = jnp.exp(-0.5 * t_grid * t_grid)                          # (K,)
 
-    term3 = jnp.sqrt(sigma ** 2 / (sigma ** 2 + 2.0))
-
-    return term1 - term2 + term3
+    # ||phi_emp - phi_norm||^2 integrated with e^{-t^2/2} weighting.
+    err = (c_t - phi_t) ** 2 + s_t ** 2                              # (K,)
+    weights = trap_weights * phi_t                                   # (K,)
+    return B * jnp.sum(err * weights)
 
 
 def _sigreg_loss(
@@ -384,21 +408,17 @@ def _sigreg_loss(
     num_points=17,
     domain=(-5.0, 5.0),
 ):
-    """SIGReg loss via sliced Epps-Pulley.
+    """SIGReg loss via sliced ECF-based Epps-Pulley integration.
 
     R: (B_global, D) batch CLS embeddings.
-    num_points/domain are kept as explicit configs for paper-compatible
-    SIGReg settings, even though the closed-form EP statistic itself
-    does not require quadrature points.
+    sigma is currently unused in this numerical ECF variant and is kept
+    only for backward-compatible config interface.
     Returns scalar.
     """
     R = R.astype(jnp.float32)
-    B, D = R.shape
-    domain_lo, domain_hi = domain
-    if domain_hi <= domain_lo:
-        raise ValueError(f"Invalid SIGReg domain: ({domain_lo}, {domain_hi})")
-    if num_points < 2:
-        raise ValueError(f"SIGReg num_points must be >= 2, got {num_points}")
+    _, D = R.shape
+    t_grid, trap_weights = _build_ep_quadrature_grid(num_points, domain)
+    _ = sigma  # kept for API compatibility with prior closed-form version.
 
     # Center and standardize per dimension
     mean = jnp.mean(R, axis=0, keepdims=True)
@@ -412,10 +432,11 @@ def _sigreg_loss(
     # Project: (B, Q)
     Y = Rn @ A.T
 
-    # Closed-form EP on slices. Keep a quadrature grid for config parity
-    # with paper settings (num_points/domain) and future numerical variants.
-    _ = jnp.linspace(domain_lo, domain_hi, num_points, dtype=jnp.float32)
-    ep_vals = jax.vmap(lambda col: _epps_pulley_1d(col, sigma=sigma), in_axes=1)(Y)
+    # vmap numerical ECF Epps-Pulley over slice columns.
+    ep_vals = jax.vmap(
+        lambda col: _ep_ecf_1d(col, t_grid, trap_weights),
+        in_axes=1,
+    )(Y)
     return jnp.mean(ep_vals)
 
 
@@ -475,9 +496,9 @@ def train_step_jepa2(state, batch, config_static):
     """
     # Per-device RNG
     step_rng = jax.random.fold_in(state.rng, jax.lax.axis_index("batch"))
-    (rng_aug, rng_t, rng_alpha, rng_noise_img, rng_noise_cls,
+    (rng_aug, rng_t, rng_alpha, rng_noise_img,
      rng_mask_ratio, rng_mask_scores, rng_label, rng_sig, rng_next) = (
-        jax.random.split(step_rng, 10)
+        jax.random.split(step_rng, 9)
     )
 
     z0 = jnp.nan_to_num(batch["latent"], nan=0.0, posinf=1e4, neginf=-1e4)
@@ -509,7 +530,6 @@ def train_step_jepa2(state, batch, config_static):
 
     # --- Noise ---
     eps_img = jax.random.normal(rng_noise_img, z0.shape)       # (B, H, W, C)
-    eps_reg = jax.random.normal(rng_noise_cls, (B, 1, D))      # (B, 1, D)
 
     # --- Variable exact-k mask ---
     M_tok, mask_ratio, k_mask = _build_variable_k_mask(
@@ -527,54 +547,44 @@ def train_step_jepa2(state, batch, config_static):
     # --- Noised latents in spatial domain ---
     t_4d = t[:, None, None, None]
     s_4d = s[:, None, None, None]
-    z_t = (1.0 - t_4d) * z0 + t_4d * eps_img
-    z_s = (1.0 - s_4d) * z0 + s_4d * eps_img
+    z_t = (1.0 - t_4d) * z0 + t_4d * eps_img    # heavier noise
+    z_s = (1.0 - s_4d) * z0 + s_4d * eps_img    # lighter noise (global view)
 
-    # Mixed view: masked tokens get z_t, unmasked get z_s
+    # Local view: masked tokens get z_t (heavy), unmasked get z_s (light)
     z_mix = M_lat * z_t + (1.0 - M_lat) * z_s
 
-    # Velocity target
+    # Velocity target (same for both views in rectified flow)
     v_target = eps_img - z0
 
     def loss_fn(params):
-        # Learnable CLS token from params
-        c_reg = jnp.broadcast_to(params['cls_token'], (B, 1, D))  # (B, 1, D)
-
-        # Noised CLS tokens
-        t_3d = t[:, None, None]
-        s_3d = s[:, None, None]
-        cls_t = (1.0 - t_3d) * c_reg + t_3d * eps_reg
-        cls_s = (1.0 - s_3d) * c_reg + s_3d * eps_reg
-
-        # Forward
+        # Forward: both views through full DiT
         out = state.apply_fn(
             {"params": params}, z_mix, t, y,
             train=True, mode="jepa2",
             z_s=z_s, t_s=s,
-            cls_s_noised=cls_s, cls_t_noised=cls_t,
             debug_collect_act_rms=True,
             rngs={"label_dropout": rng_label},
         )
-        v_pred = out["v_pred"]     # (B, H, W, C)
-        r_s = out["r_s"]           # (B, D)
-        r_t = out["r_t"]           # (B, D)
-        act_rms = out["act_rms"]   # (depth,), measured on t-view branch
+        v_pred_g = out["v_pred_g"]   # (B, H, W, C)
+        v_pred_l = out["v_pred_l"]   # (B, H, W, C)
+        z_g = out["z_g"]             # (B, D)
+        z_l = out["z_l"]             # (B, D)
+        act_rms = out["act_rms"]     # (depth,)
 
-        # L_gen: MSE on velocity
-        l_gen = jnp.mean((v_pred - v_target) ** 2)
+        # L_gen: MSE on velocity for BOTH views, averaged
+        l_gen_g = jnp.mean((v_pred_g - v_target) ** 2)
+        l_gen_l = jnp.mean((v_pred_l - v_target) ** 2)
+        l_gen = 0.5 * (l_gen_g + l_gen_l)
 
-        # L_jepa: cosine loss on CLS vectors
-        cos_cls = _safe_cosine(r_t, r_s)   # (B,)
-        l_jepa = jnp.mean(1.0 - cos_cls)
+        # L_pred: MSE between local and global readout embeddings
+        l_pred = jnp.mean((z_l - z_g) ** 2)
 
-        # L_sig: SIGReg on globally-gathered CLS embeddings
-        r_s_global = jax.lax.all_gather(r_s, axis_name="batch")
-        r_s_global = r_s_global.reshape(-1, D)   # (B_global, D)
-        r_t_global = jax.lax.all_gather(r_t, axis_name="batch")
-        r_t_global = r_t_global.reshape(-1, D)   # (B_global, D)
+        # L_sig: SIGReg on globally-gathered GLOBAL embeddings only
+        z_g_global = jax.lax.all_gather(z_g, axis_name="batch")
+        z_g_global = z_g_global.reshape(-1, D)   # (B_global, D)
 
-        l_sig = _cls_sigreg_loss(
-            r_s_global, r_t_global, rng_sig,
+        l_sig = _sigreg_loss(
+            z_g_global, rng_sig,
             num_slices=config_static.jepa2_sigreg_slices,
             sigma=config_static.jepa2_sigreg_sigma,
             num_points=config_static.jepa2_sigreg_num_points,
@@ -585,11 +595,13 @@ def train_step_jepa2(state, batch, config_static):
         )
 
         lam = config_static.lambda_jepa2
-        l_total = l_gen + lam * (0.95 * l_jepa + 0.05 * l_sig)
+        l_total = l_gen + lam * (0.95 * l_pred + 0.05 * l_sig)
 
         metrics = {
             "l_gen": l_gen,
-            "l_jepa": l_jepa,
+            "l_gen_g": l_gen_g,
+            "l_gen_l": l_gen_l,
+            "l_pred": l_pred,
             "l_sig": l_sig,
             "l_total": l_total,
             "t_mean": jnp.mean(t),

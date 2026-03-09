@@ -101,7 +101,7 @@ Per batch:
 14. Loss terms:
     - `L_gen = MSE(v_pred, eps_img - z0)` (flow matching velocity)
     - `L_JEPA = mean(1 - cosine(r_t, r_s))` (cosine on CLS vectors)
-    - `L_SIG = 0.5 * SIGReg(r_s) + 0.5 * SIGReg(r_t)` (Epps-Pulley, 512 slices, global batch via `all_gather`)
+    - `L_SIG = 0.5 * SIGReg(r_s) + 0.5 * SIGReg(r_t)` (Epps-Pulley ECF numerical integration, 512 slices, 17 points on `[-5,5]`, global batch via `all_gather`)
     - `L_total = L_gen + 0.05 * (L_JEPA + L_SIG)`
 15. No EMA teacher, no stop-grad, no cross-attention predictor.
 
