@@ -619,8 +619,9 @@ def train_step_jepa2(state, batch, config_static):
 
     state = state.apply_gradients(grads)
 
-    # Sync params → ema_params (no EMA decay in jepa2, but sampling uses ema_params)
-    state = state.replace(ema_params=state.params)
+    # EMA update
+    ema_decay = config_static.ema_decay
+    state = state.update_ema(ema_decay)
 
     # Advance RNG
     new_rng = jax.random.split(state.rng)[0]
