@@ -10,7 +10,7 @@ from dataclasses import asdict, dataclass, field
 @dataclass
 class Config:
     # --- Mode ---
-    mode: str = "baseline"  # "baseline" | "jepa"
+    mode: str = "baseline"  # "baseline" | "jepa" | "jepa2"
 
     # --- Data (Kaggle default) ---
     data_dir: str = "/kaggle/input/miniimagenet256-latents-arrayrecord-sdvae"
@@ -47,6 +47,16 @@ class Config:
     mask_ratio: float = 0.25
     student_layer: int = 4
     teacher_layer: int = 8
+
+    # --- JEPA2-specific ---
+    lambda_jepa2: float = 0.05
+    jepa2_split_layer: int = 4
+    jepa2_mask_lo: float = 0.2
+    jepa2_mask_hi: float = 0.4
+    jepa2_t_shift: float = 1.78
+    jepa2_alpha_lo: float = 1.4
+    jepa2_alpha_hi: float = 2.0
+    jepa2_sigreg_slices: int = 512
 
     # --- Eval / Sampling ---
     cfg_scale: float = 2.0
@@ -97,7 +107,7 @@ class Config:
 
         # Mode
         parser.add_argument("--mode", type=str, default="baseline",
-                            choices=["baseline", "jepa"])
+                            choices=["baseline", "jepa", "jepa2"])
 
         # Data
         parser.add_argument("--data_dir", type=str,
@@ -137,6 +147,16 @@ class Config:
         parser.add_argument("--mask_ratio", type=float, default=0.25)
         parser.add_argument("--student_layer", type=int, default=3)
         parser.add_argument("--teacher_layer", type=int, default=7)
+
+        # JEPA2-specific
+        parser.add_argument("--lambda_jepa2", type=float, default=0.05)
+        parser.add_argument("--jepa2_split_layer", type=int, default=4)
+        parser.add_argument("--jepa2_mask_lo", type=float, default=0.2)
+        parser.add_argument("--jepa2_mask_hi", type=float, default=0.4)
+        parser.add_argument("--jepa2_t_shift", type=float, default=1.78)
+        parser.add_argument("--jepa2_alpha_lo", type=float, default=1.4)
+        parser.add_argument("--jepa2_alpha_hi", type=float, default=2.0)
+        parser.add_argument("--jepa2_sigreg_slices", type=int, default=512)
 
         # Eval / Sampling
         parser.add_argument("--cfg_scale", type=float, default=1.0)

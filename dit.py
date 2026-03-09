@@ -40,6 +40,7 @@ class JepaDiT(nn.Module):
     class_dropout_prob: float = 0.1
     student_layer: int = 4
     teacher_layer: int = 8
+    jepa2_split_layer: int = 4
     latent_size: int = 32
     latent_channels: int = 4
 
@@ -69,21 +70,30 @@ class JepaDiT(nn.Module):
         self.teacher_head = TeacherHead(hidden_size=D)
         self.cross_attn_pred = CrossAttentionPredictor(hidden_size=D, num_heads=self.num_heads)
 
+        # JEPA2-specific: learnable CLS token
+        self.cls_token = self.param('cls_token', nn.initializers.normal(0.02), (1, 1, D))
+
     def __call__(self, x, t, y, *, train: bool = False, mode: str = "baseline",
-                 mask=None):
+                 mask=None, z_s=None, t_s=None,
+                 cls_s_noised=None, cls_t_noised=None):
         """
         Args:
             x:    (B, 32, 32, 4)  latent input (possibly noised)
             t:    (B,)            timestep in [0, 1]
             y:    (B, num_classes) one-hot class label
             train: whether training (enables label dropout)
-            mode:  "baseline" | "jepa" | "teacher"
+            mode:  "baseline" | "jepa" | "teacher" | "jepa2"
             mask:  (B, N) float32 {0,1} token mask — only used in "jepa" mode
+            z_s:   (B, 32, 32, 4) s-view latent — only used in "jepa2" mode
+            t_s:   (B,)           s-view timestep — only used in "jepa2" mode
+            cls_s_noised: (B, 1, D) noised CLS for s-view — only "jepa2"
+            cls_t_noised: (B, 1, D) noised CLS for t-view — only "jepa2"
 
         Returns dict with keys depending on mode:
             "baseline" → {"v_pred": (B, 32, 32, 4)}
             "jepa"     → {"v_pred": (B, 32, 32, 4), "h_pred": (B, N, D)}
             "teacher"  → {"h_target": (B, N, D)}
+            "jepa2"    → {"v_pred": (B, 32, 32, 4), "r_s": (B, D), "r_t": (B, D)}
         """
         B = x.shape[0]
         H = W = self.latent_size
@@ -95,7 +105,45 @@ class JepaDiT(nn.Module):
         pos_embed = get_2d_sincos_pos_embed(self.hidden_size, grid)  # (1, N, D) np
         pos_embed = jax.lax.stop_gradient(jnp.array(pos_embed))
 
-        # --- Patchify + pos embed ---
+        # --- JEPA2: dual-view split-depth forward ---
+        if mode == "jepa2":
+            # Patchify both views from raw spatial input
+            tokens_t = self.patch_embed(x) + pos_embed      # (B, N, D)
+            tokens_s = self.patch_embed(z_s) + pos_embed     # (B, N, D)
+
+            # Prepend noised CLS tokens
+            seq_t = jnp.concatenate([cls_t_noised, tokens_t], axis=1)  # (B, N+1, D)
+            seq_s = jnp.concatenate([cls_s_noised, tokens_s], axis=1)  # (B, N+1, D)
+
+            # Conditioning: shared y_embed, different t_embed
+            y_emb = self.y_embed(y, train=train)
+            c_t = self.t_embed(t) + y_emb       # (B, D)
+            c_s = self.t_embed(t_s) + y_emb     # (B, D)
+
+            # First split_layer blocks on BOTH views
+            split = self.jepa2_split_layer
+            for i in range(split):
+                seq_t = self.blocks[i](seq_t, c_t)
+                seq_s = self.blocks[i](seq_s, c_s)
+
+            # Extract CLS vectors
+            r_t = seq_t[:, 0, :]   # (B, D)
+            r_s = seq_s[:, 0, :]   # (B, D)
+
+            # Continue only t-view through remaining blocks
+            for i in range(split, self.depth):
+                seq_t = self.blocks[i](seq_t, c_t)
+
+            # FinalLayer on image tokens only (skip CLS at position 0)
+            img_tokens = seq_t[:, 1:, :]           # (B, N, D)
+            x_out = self.final_layer(img_tokens, c_t)  # (B, N, p*p*C)
+            x_out = x_out.reshape(B, grid, grid, p, p, C)
+            x_out = jnp.einsum("bhwpqc->bhpwqc", x_out)
+            v_pred = x_out.reshape(B, H, W, C)
+
+            return {"v_pred": v_pred, "r_s": r_s, "r_t": r_t}
+
+        # --- Patchify + pos embed (baseline / jepa / teacher) ---
         x = self.patch_embed(x)      # (B, N, D)
         x = x + pos_embed            # (B, N, D)
 

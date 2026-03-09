@@ -1,11 +1,11 @@
 # Soft-JEPA-Flow (JAX/Flax, TPU-friendly)
 
-Repo này huấn luyện mô hình sinh latent theo 2 chế độ:
+This repository trains a latent generative model in two modes:
 
-1. `baseline`: DiT + rectified-flow/flow-matching.
-2. `jepa`: baseline + JEPA loss (student/teacher EMA + cross-attention predictor).
+1. `baseline`: DiT + rectified flow / flow matching.
+2. `jepa`: baseline objective + JEPA representation loss (student/EMA-teacher + cross-attention predictor).
 
-Tài liệu này phản ánh **trạng thái code hiện tại** trong repo, đặc biệt các file:
+This README reflects the current codebase status, especially:
 - `train.py`
 - `train_step.py`
 - `sample.py`
@@ -15,25 +15,27 @@ Tài liệu này phản ánh **trạng thái code hiện tại** trong repo, đ�
 - `inception_fid.py`
 - `configs.py`
 
-## 1) Những gì đã được bù đắp so với bản cũ
+## 1) What Has Been Updated vs Older Versions
 
-- Đã bỏ pipeline pseudo-RGB cho FID:
-  - FID hiện dùng decode thật bằng SD-VAE trong `vae_decode.py`.
-  - FID dùng InceptionV3 vendored (`inception_fid.py`), không dùng TFHub như bản cũ.
-- Đã bỏ pseudo-RGB khi log ảnh mẫu:
-  - `logging_utils.log_sample_grid` decode latent thật bằng SD-VAE.
-- Validation JEPA:
-  - `run_validation` đã tính trực tiếp `L_gen`, `L_repa`, `L_total`.
+- Pseudo-RGB FID path has been removed.
+  - FID now uses true SD-VAE decode in `vae_decode.py`.
+  - Inception is vendored (`inception_fid.py`) and used in the FID pipeline.
+- Pseudo-RGB sample logging has been removed.
+  - `logging_utils.log_sample_grid` now decodes real RGB via SD-VAE.
+- JEPA validation path is integrated in `run_validation`.
+  - In JEPA mode, validation logs `L_gen`, `L_repa`, and `L_total`.
+- Standalone inference script is now available.
+  - `infer.py` supports loading checkpoints and running sampling/optional decode outside `train.py`.
 
-## 2) Dữ liệu đầu vào
+## 2) Input Dataset Format
 
-Dữ liệu train là latent đã mã hóa sẵn từ SD-VAE (`stabilityai/sd-vae-ft-mse`):
-- shape latent: `(32, 32, 4)` (NHWC)
-- mỗi record ArrayRecord:
+Training data is precomputed SD-VAE latent data (`stabilityai/sd-vae-ft-mse`):
+- latent shape: `(32, 32, 4)` (NHWC)
+- each ArrayRecord example:
   - `label`: `uint16` (2 bytes, little-endian)
-  - `latent`: phần còn lại, `float16`, reshape thành `(32,32,4)`
+  - `latent`: remaining bytes, `float16`, reshaped to `(32, 32, 4)`
 
-Cấu trúc thư mục mong đợi:
+Expected directory structure:
 
 ```text
 <DATA_DIR>/
@@ -43,120 +45,155 @@ Cấu trúc thư mục mong đợi:
   meta_val.json
 ```
 
-`data.py` sẽ parse record và tạo one-hot label.
+`data.py` parses records and converts labels to one-hot vectors.
 
-## 3) Cơ chế huấn luyện
+## 3) Training Flow
 
 ### 3.1 Baseline (rectified flow)
 
-Mỗi batch:
-1. Augment latent (`flip`, `jitter`).
-2. Sample `t` theo lịch (`lognormal` hoặc `uniform`).
-3. Sample noise `z1 ~ N(0, I)`.
-4. Tạo `z_t = (1 - t) * z0 + t * z1`.
-5. Target velocity: `v_target = z1 - z0`.
-6. Dự đoán `v_pred` bằng model ở `mode="baseline"`.
-7. Loss: `L_gen = MSE(v_pred, v_target)`.
+Per batch:
+1. Apply latent augmentations (`flip`, `jitter`).
+2. Sample timestep `t` (lognormal or uniform schedule).
+3. Sample Gaussian noise `z1 ~ N(0, I)`.
+4. Build noisy latent `z_t = (1 - t) * z0 + t * z1`.
+5. Target velocity is `v_target = z1 - z0`.
+6. Model predicts `v_pred` in `mode="baseline"`.
+7. Loss is `L_gen = MSE(v_pred, v_target)`.
 
 ### 3.2 JEPA
 
-Mỗi batch:
-1. Augment latent như baseline.
-2. Sample `t, s` theo lịch timestep.
-3. `tau_min = min(t,s)`, `tau_max = max(t,s)`.
-4. Sample token mask `M_tok` với `mask_ratio`.
-5. Tạo:
-   - `z_clean` cho teacher (noise theo `tau_min`).
-   - `z_mixed` cho student (token-wise trộn `tau_min/tau_max`).
-6. Student forward ở `mode="jepa"` trả về:
+Per batch:
+1. Apply the same latent augmentations.
+2. Sample `t, s` from the timestep schedule.
+3. Compute `tau_min = min(t, s)`, `tau_max = max(t, s)`.
+4. Sample token mask `M_tok` with `mask_ratio`.
+5. Build:
+   - `z_clean` for teacher path (`tau_min` noise level)
+   - `z_mixed` for student path (token-wise `tau_min/tau_max` mixing)
+6. Student forward in `mode="jepa"` returns:
    - `v_pred`
    - `h_pred`
-7. Teacher forward bằng `ema_params` ở `mode="teacher"` trả về `h_target`.
-8. Loss:
+7. Teacher forward with `ema_params` in `mode="teacher"` returns `h_target`.
+8. Loss terms:
    - `L_gen = MSE(v_pred, v_target)`
-   - `L_JEPA = 1 - cosine(h_pred, h_target)` (chỉ tính trên token target theo `M_tok`)
+   - `L_JEPA = 1 - cosine(h_pred, h_target)` on target tokens (`M_tok`)
    - `L_total = L_gen + lambda_jepa * L_JEPA`
-9. Cập nhật optimizer cho student params, sau đó EMA update teacher.
+9. Optimizer update on student params, then EMA update.
 
-## 4) Sampling / Infer
+## 4) Sampling and Inference
 
 ### 4.1 Sampling core (`sample.py`)
 
-Sampling dùng Euler ODE trong latent space:
-- khởi tạo `z ~ N(0, I)` tại `t=1`
-- tích phân về `t=0` trong `sample_steps`
-- CFG: chạy cond/uncond rồi trộn theo `cfg_scale`
+Sampling uses Euler ODE integration in latent space:
+- initialize `z ~ N(0, I)` at `t=1`
+- integrate to `t=0` for `sample_steps`
+- CFG uses conditional and unconditional passes with `cfg_scale`
 
-Lưu ý quan trọng: trong sampling, model luôn chạy `mode="baseline"` để lấy head velocity (kể cả checkpoint train bằng JEPA).
+Important: sampling always uses `mode="baseline"` velocity head, including checkpoints trained in JEPA mode.
 
-### 4.2 Inference CLI độc lập (`infer.py`)
+### 4.2 Standalone inference (`infer.py`)
 
-Repo đã có entrypoint inference riêng để chạy trực tiếp từ checkpoint:
+You can run inference directly from checkpoint folders:
 
 ```bash
 python infer.py --ckpt_dir <CKPT_ROOT> --num_images 16 --decode
 ```
 
-Checkpoint resolve theo thứ tự:
-1. `--ckpt_path` (nếu truyền trực tiếp `step_*`)
+Checkpoint resolution order:
+1. `--ckpt_path` (explicit `step_*` directory)
 2. `--ckpt_dir/latest`
-3. `step_*` mới nhất trong `--ckpt_dir`
+3. newest `step_*` inside `--ckpt_dir`
 
-`infer.py` sẽ:
-1. Đọc `config.json` từ checkpoint step dir.
-2. Khởi tạo model đúng kiến trúc và restore strict Orbax (`params`, `ema_params`, `step`, `rng`).
-3. Sample latent bằng `euler_sample(...)`.
-4. Lưu output:
+`infer.py` does the following:
+1. Reads `config.json` from checkpoint step directory.
+2. Builds model with matching architecture and performs strict Orbax restore (`params`, `ema_params`, `step`, `rng`).
+3. Runs latent sampling with `euler_sample(...)`.
+4. Saves outputs:
    - `latents.npy`
    - `class_ids.npy`
    - `meta.json`
-   - nếu bật `--decode`: `grid.png` và `images/img_XXXX.png`
+   - when `--decode` is enabled: `grid.png` and `images/img_XXXX.png`
 
-Mặc định inference dùng `ema_params`. Có thể dùng raw weights bằng `--use_raw_params`.
+Default inference uses `ema_params`. Use `--use_raw_params` to sample with raw `params`.
 
-## 5) FID và Visualization (trạng thái hiện tại)
+## 5) Evaluation: FID and Visualization
 
 ### 5.1 FID (`fid.py`)
 
-Pipeline FID thật:
-1. Lấy hoặc tính real stats (`mu`, `sigma`) từ val set.
-2. Decode latent thật bằng SD-VAE (`vae_decode.decode_latents_nhwc`).
-3. Resize về `299x299`, scale về `[-1,1]` cho Inception.
-4. Trích xuất feature bằng InceptionV3 vendored (`inception_fid.py`) qua JAX `pmap`.
-5. Tính Frechet distance.
+Current FID pipeline:
+1. Load or compute real stats (`mu`, `sigma`) from validation data.
+2. Decode latents with SD-VAE (`vae_decode.decode_latents_nhwc`).
+3. Resize to `299x299` and map from `[0,1]` to `[-1,1]` for Inception input.
+4. Extract Inception features via vendored Inception (`inception_fid.py`) with JAX `pmap`.
+5. Compute Frechet distance.
 
-Cache real stats:
-- file: `--fid_cache_path` (mặc định `checkpoints/fid_real_stats_4096.npz`)
-- batch decode: `--fid_decode_batch`
-- batch inception: `--fid_inception_batch`
+Real stats cache:
+- file: `--fid_cache_path` (default shown below)
+- decode batch: `--fid_decode_batch`
+- inception batch: `--fid_inception_batch`
 
-### 5.2 Log sample grid (`logging_utils.py`)
+### 5.2 Sample grid logging (`logging_utils.py`)
 
-`log_sample_grid` decode latent thật bằng SD-VAE rồi mới log ảnh RGB lên W&B.
+`log_sample_grid` decodes true RGB images via SD-VAE before logging to W&B.
 
-## 6) Validation behavior
+## 6) Validation Behavior
 
-`run_validation` là đường validation duy nhất:
-- `baseline`: log `L_gen`, `L_total`
-- `jepa`: log `L_gen`, `L_repa`, `L_total`
+`run_validation` is the active validation path:
+- `baseline`: logs `L_gen`, `L_total`
+- `jepa`: logs `L_gen`, `L_repa`, `L_total`
 
-Trong đó `L_repa` là representation loss theo công thức cosine (tương đương thành phần JEPA trong validation).
+`L_repa` is the JEPA-like representation term computed from cosine similarity.
 
-## 7) Cài đặt
+## 7) W&B Logging and Model Debug
+
+At `log_every`, training logs regular metrics plus debug metrics:
+- gradient and parameter norms:
+  - `train/grad_norm`
+  - `train/param_norm`
+  - `train/grad_scale` (JEPA step)
+- divergence counters:
+  - `train/nan_count`
+  - `train/inf_count`
+- activation/adaLN debug (default-on, lightweight):
+  - `debug/block{idx}_adaln_mean`
+  - `debug/block{idx}_adaln_std`
+
+## 8) Checkpointing and Hugging Face Upload
+
+Checkpoint content includes:
+- `params`, `ema_params`, `opt_state`, `step`, `rng`
+
+Behavior:
+- periodic save is controlled by `--ckpt_every`
+- Orbax destination collision is handled by retrying with timestamp suffix
+- `latest` symlink is updated after each save
+- strict restore is enforced for current full JEPA+teacher param tree
+
+Best checkpoint tracking:
+- metric: `quick_fid_4096` or `val_loss`
+- best checkpoints are stored under `ckpt_dir/best`
+
+Hugging Face upload:
+- triggered only on new best metric
+- auto-creates repo (`create_repo(..., exist_ok=True)`)
+- uploads checkpoint folder and updates an English model card
+- requires `HF_TOKEN` with write permission
+
+## 9) Installation
 
 ```bash
 pip install -r requirements.txt
 ```
 
-`requirements.txt` hiện đã gồm:
+Current `requirements.txt` includes:
 - JAX/Flax/Optax/Orbax/Grain
-- W&B + HF Hub
+- W&B + Hugging Face Hub
 - `torch` (CPU index), `diffusers`, `transformers`, `safetensors`
 - `requests`, `tqdm`, `Pillow`, `scipy`
 
-## 8) Cách chạy
+## 10) Run Commands
 
-### 8.1 Baseline
+### 10.1 Baseline
 
 ```bash
 python train.py \
@@ -172,7 +209,7 @@ python train.py \
   --fid_decode_batch 32 --fid_inception_batch 64
 ```
 
-### 8.2 JEPA
+### 10.2 JEPA
 
 ```bash
 python train.py \
@@ -189,9 +226,9 @@ python train.py \
   --fid_decode_batch 32 --fid_inception_batch 64
 ```
 
-### 8.3 Inference từ checkpoint
+### 10.3 Inference from checkpoint
 
-Dùng `latest` (hoặc tự fallback step mới nhất nếu thiếu `latest`):
+Use `latest` (or fallback to newest `step_*` if `latest` is missing):
 
 ```bash
 python infer.py \
@@ -204,7 +241,7 @@ python infer.py \
   --out_dir /kaggle/working/infer_out
 ```
 
-Trỏ thẳng vào một step cụ thể:
+Use an explicit step directory:
 
 ```bash
 python infer.py \
@@ -214,9 +251,9 @@ python infer.py \
   --decode
 ```
 
-## 9) Toàn bộ CLI flags và effective defaults (argparse)
+## 11) Full CLI Flags and Effective Defaults (argparse)
 
-`train.py` dùng `Config.from_args()`, nên mặc định hiệu lực là từ `argparse` trong `configs.py`.
+`train.py` uses `Config.from_args()`, so effective runtime defaults come from argparse in `configs.py`.
 
 ### Mode/Data
 - `--mode` = `baseline` (`baseline|jepa`)
@@ -273,30 +310,20 @@ python infer.py \
 - `--run_name` = `run`
 - `--ckpt_dir` = `checkpoints`
 - `--best_metric` = `quick_fid_4096` (`quick_fid_4096|val_loss`)
-- `--hf_repo_id` = `""` (nếu để rỗng sẽ dùng `hf_username/hf_repo_name`)
+- `--hf_repo_id` = `""` (if empty, it falls back to `hf_username/hf_repo_name`)
 - `--hf_username` = `"Bangchis"`
 - `--hf_repo_name` = `"soft-jepa-flow"`
-- `--hf_private` = `False` (bật flag `--hf_private` để tạo repo private)
+- `--hf_private` = `False` (enable by passing `--hf_private`)
 
-## 10) Ghi chú kỹ thuật: Dataclass defaults vs CLI defaults
+## 12) Technical Note: Dataclass Defaults vs CLI Defaults
 
-`Config` trong dataclass có vài giá trị khác parser defaults (ví dụ `global_batch`, `cfg_scale`, `sample_steps`, `log_every`, `weight_decay`).
+`Config` dataclass includes some values different from argparse defaults.
 
-Khi chạy `python train.py ...`, chương trình dùng `Config.from_args()` nên **parser defaults mới là mặc định thực tế**.
+When you run `python train.py ...`, the actual defaults come from `Config.from_args()` (argparse).
 
-## 11) Known limitations
+## 13) Known Limitations
 
-1. Decode SD-VAE trên CPU có thể là bottleneck khi `fid_n` lớn hoặc decode batch lớn.
-2. Inception weights trong `inception_fid.py` được tải về lúc cần (lần chạy đầu cần mạng).
+1. SD-VAE decode on CPU can be a bottleneck for large `fid_n` or large decode batch.
+2. Inception weights in `inception_fid.py` are downloaded on first use.
+3. `infer.py` strict restore expects checkpoints compatible with the current full JEPA+teacher parameter tree.
 
-## 12) Tương thích và checkpoint
-
-- Model checkpoint lưu cả `params`, `ema_params`, `opt_state`, `step`, `rng`.
-- Sampling/FID trong training loop dùng `ema_params`.
-- Có hỗ trợ chọn metric tốt nhất (`quick_fid_4096` hoặc `val_loss`) và upload HF tùy chọn.
-- Upload HF:
-  - Lần upload đầu sẽ tự tạo repo model nếu chưa tồn tại.
-  - Nếu `--hf_repo_id` rỗng, repo đích sẽ là `{hf_username}/{hf_repo_name}`.
-  - Mỗi lần có best mới sẽ upload theo path có timestamp UTC, ví dụ:
-    `run_name/best/step_<step>_YYYYMMDD-HHMMSS-UTC`.
-  - Cần `HF_TOKEN` có quyền write.

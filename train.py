@@ -23,7 +23,10 @@ from configs import Config
 from data import create_loader
 from dit import JepaDiT
 from train_state import TrainState
-from train_step import StaticConfig, train_step_baseline, train_step_jepa
+from train_step import (
+    StaticConfig, train_step_baseline, train_step_jepa, train_step_jepa2,
+    _sample_t_logit_normal_shifted, _build_variable_k_mask, _cls_sigreg_loss,
+)
 from sample import sample_images
 from checkpoint import save_checkpoint, maybe_restore, BestMetricTracker
 from logging_utils import (
@@ -65,6 +68,16 @@ def make_config_static(config: Config) -> StaticConfig:
         t_schedule=0 if config.t_schedule == "lognormal" else 1,
         t_lognorm_mean=config.t_lognorm_mean,
         t_lognorm_std=config.t_lognorm_std,
+        # JEPA2
+        lambda_jepa2=config.lambda_jepa2,
+        jepa2_split_layer=config.jepa2_split_layer,
+        jepa2_mask_lo=config.jepa2_mask_lo,
+        jepa2_mask_hi=config.jepa2_mask_hi,
+        jepa2_t_shift=config.jepa2_t_shift,
+        jepa2_alpha_lo=config.jepa2_alpha_lo,
+        jepa2_alpha_hi=config.jepa2_alpha_hi,
+        jepa2_sigreg_slices=config.jepa2_sigreg_slices,
+        hidden_size=config.hidden_size,
     )
 
 
@@ -148,6 +161,7 @@ def main():
         class_dropout_prob=config.class_dropout_prob,
         student_layer=config.student_layer,
         teacher_layer=config.teacher_layer,
+        jepa2_split_layer=config.jepa2_split_layer,
         latent_size=config.latent_size,
         latent_channels=config.latent_channels,
     )
@@ -161,17 +175,44 @@ def main():
     dummy_t = jnp.zeros((per_device_batch,))
     dummy_y = jnp.zeros((per_device_batch, config.num_classes))
 
-    params = init_full_params(
-        model_def,
-        config,
-        param_rng=param_rng,
-        dummy_z=dummy_z,
-        dummy_t=dummy_t,
-        dummy_y=dummy_y,
-    )
+    if config.mode == "jepa2":
+        # JEPA2: init with mode="jepa2" to get cls_token param,
+        # then merge with baseline init for sampling compatibility
+        D = config.hidden_size
+        dummy_cls = jnp.zeros((per_device_batch, 1, D))
+        rng_j2, rng_bl = jax.random.split(param_rng)
+
+        params_jepa2 = model_def.init(
+            {"params": rng_j2},
+            dummy_z, dummy_t, dummy_y,
+            train=False, mode="jepa2",
+            z_s=dummy_z, t_s=dummy_t,
+            cls_s_noised=dummy_cls, cls_t_noised=dummy_cls,
+        )["params"]
+
+        params_baseline = model_def.init(
+            {"params": rng_bl},
+            dummy_z, dummy_t, dummy_y,
+            train=False, mode="baseline",
+        )["params"]
+
+        params = merge_param_trees(
+            params_jepa2, params_baseline,
+            tree_a_name="jepa2", tree_b_name="baseline",
+        )
+        print("[init] Initialized full param tree for jepa2+baseline.")
+    else:
+        params = init_full_params(
+            model_def,
+            config,
+            param_rng=param_rng,
+            dummy_z=dummy_z,
+            dummy_t=dummy_t,
+            dummy_y=dummy_y,
+        )
+        print("[init] Initialized full param tree for jepa+teacher.")
 
     param_count = sum(x.size for x in jax.tree.leaves(params))
-    print("[init] Initialized full param tree for jepa+teacher.")
     print(f"[init] Model params: {param_count:,}")
 
     # --- Optimizer + TrainState ---
@@ -217,7 +258,12 @@ def main():
     fixed_sample_rng = sample_rng
 
     # --- Training loop ---
-    train_step_fn = train_step_jepa if config.mode == "jepa" else train_step_baseline
+    if config.mode == "jepa2":
+        train_step_fn = train_step_jepa2
+    elif config.mode == "jepa":
+        train_step_fn = train_step_jepa
+    else:
+        train_step_fn = train_step_baseline
 
     print(f"[train] Starting {config.mode} training for {config.steps} steps...")
 
@@ -326,7 +372,80 @@ def run_validation(state, val_loader, config: Config, num_devices: int) -> dict:
         batch_jax = jax.tree.map(lambda x: jnp.array(x), batch)
         sharded = shard_batch(batch_jax, num_devices)
 
-        if config.mode == "baseline":
+        if config.mode == "jepa2":
+            # JEPA2 val: L_gen + L_jepa + L_sig + L_total
+            z0 = sharded["latent"][0]
+            y = sharded["label"][0]
+            B = z0.shape[0]
+            p = config.patch_size
+            H = W = config.latent_size
+            gh, gw = H // p, W // p
+            N = gh * gw
+            D = config.hidden_size
+
+            rng_base = jax.random.PRNGKey(count)
+            rng_t, rng_alpha, rng_noise, rng_noise_cls, rng_mask_r, rng_mask_s, rng_sig = (
+                jax.random.split(rng_base, 7)
+            )
+
+            # Timestep sampling
+            t_val = _sample_t_logit_normal_shifted(rng_t, (B,), shift=config.jepa2_t_shift)
+            alpha = jax.random.uniform(rng_alpha, (B,),
+                                       minval=config.jepa2_alpha_lo,
+                                       maxval=config.jepa2_alpha_hi)
+            s_val = jnp.clip(t_val / alpha, 1e-5, 1.0 - 1e-5)
+
+            z1 = jax.random.normal(rng_noise, z0.shape)
+            eps_reg = jax.random.normal(rng_noise_cls, (B, 1, D))
+            v_target = z1 - z0
+
+            # Variable mask
+            M_tok, _, _ = _build_variable_k_mask(
+                rng_mask_r, rng_mask_s, B, N,
+                lo=config.jepa2_mask_lo, hi=config.jepa2_mask_hi,
+            )
+            M_2d = M_tok.reshape(B, gh, gw)
+            M_lat = jnp.repeat(jnp.repeat(M_2d, p, axis=1), p, axis=2)[..., None]
+
+            t_4d = t_val[:, None, None, None]
+            s_4d = s_val[:, None, None, None]
+            z_t = (1.0 - t_4d) * z0 + t_4d * z1
+            z_s = (1.0 - s_4d) * z0 + s_4d * z1
+            z_mix = M_lat * z_t + (1.0 - M_lat) * z_s
+
+            # CLS tokens
+            c_reg = state_single.params['cls_token']  # (1, 1, D)
+            c_reg_b = jnp.broadcast_to(c_reg, (B, 1, D))
+            t_3d = t_val[:, None, None]
+            s_3d = s_val[:, None, None]
+            cls_t = (1.0 - t_3d) * c_reg_b + t_3d * eps_reg
+            cls_s = (1.0 - s_3d) * c_reg_b + s_3d * eps_reg
+
+            out = state_single.apply_fn(
+                {"params": state_single.params}, z_mix, t_val, y,
+                train=False, mode="jepa2",
+                z_s=z_s, t_s=s_val,
+                cls_s_noised=cls_s, cls_t_noised=cls_t,
+            )
+            v_pred = out["v_pred"]
+            r_s = out["r_s"]
+            r_t = out["r_t"]
+
+            l_gen = float(jnp.mean((v_pred - v_target) ** 2))
+
+            # Cosine JEPA on CLS
+            r_t_n = r_t / (jnp.linalg.norm(r_t, axis=-1, keepdims=True) + 1e-8)
+            r_s_n = r_s / (jnp.linalg.norm(r_s, axis=-1, keepdims=True) + 1e-8)
+            l_jepa = float(jnp.mean(1.0 - jnp.sum(r_t_n * r_s_n, axis=-1)))
+
+            # SIGReg (single device, use local batch)
+            l_sig = float(_cls_sigreg_loss(r_s, r_t, rng_sig,
+                                           num_slices=config.jepa2_sigreg_slices))
+
+            l_total = l_gen + config.lambda_jepa2 * (l_jepa + l_sig)
+            batch_metrics = {"l_gen": l_gen, "l_jepa": l_jepa, "l_sig": l_sig, "l_total": l_total}
+
+        elif config.mode == "baseline":
             # Simple forward pass for val loss
             t = jax.random.uniform(jax.random.PRNGKey(count), (sharded["latent"].shape[1],))
             z0 = sharded["latent"][0]
