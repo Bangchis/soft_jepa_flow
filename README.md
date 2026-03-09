@@ -187,6 +187,9 @@ At `log_every`, training logs regular metrics plus debug metrics:
 - divergence counters:
   - `train/nan_count`
   - `train/inf_count`
+- per-block activation RMS (logged from noisy `t` branch):
+  - `train/act_rms_block_00` ... `train/act_rms_block_11` (for depth=12)
+  - in `jepa2`, these are measured on the high-noise `t` view across DiT blocks
 - activation/adaLN debug (default-on, lightweight):
   - `debug/block{idx}_adaln_mean`
   - `debug/block{idx}_adaln_std`

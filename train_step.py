@@ -32,6 +32,12 @@ def _safe_cosine(a: jax.Array, b: jax.Array) -> jax.Array:
     return jnp.clip(cos, -1.0, 1.0)
 
 
+def _block_rms_metrics(act_rms: jax.Array, key_prefix: str = "act_rms_block") -> dict:
+    """Flatten per-block activation RMS array into scalar metric dict."""
+    n_blocks = act_rms.shape[0]
+    return {f"{key_prefix}_{i:02d}": act_rms[i] for i in range(n_blocks)}
+
+
 # -------------------------------------------------------------------------
 # Timestep sampling: lognormal (default) or uniform
 # -------------------------------------------------------------------------
@@ -133,11 +139,15 @@ def train_step_baseline(state, batch, config_static):
         out = state.apply_fn(
             {"params": params}, z_t, t, y,
             train=True, mode="baseline",
+            debug_collect_act_rms=True,
             rngs={"label_dropout": rng_label},
         )
         v_pred = out["v_pred"]
+        act_rms = out["act_rms"]
         l_gen = jnp.mean((v_pred - v_target) ** 2)
-        return l_gen, {"l_gen": l_gen, "l_total": l_gen}
+        metrics = {"l_gen": l_gen, "l_total": l_gen}
+        metrics.update(_block_rms_metrics(act_rms))
+        return l_gen, metrics
 
     (loss, metrics), grads = jax.value_and_grad(loss_fn, has_aux=True)(state.params)
 
@@ -251,10 +261,12 @@ def train_step_jepa(state, batch, config_static):
         out_stu = state.apply_fn(
             {"params": params}, z_mixed, tau_max, y,
             train=True, mode="jepa", mask=M_tok,
+            debug_collect_act_rms=True,
             rngs={"label_dropout": rng_label},
         )
         v_pred = out_stu["v_pred"]     # (B, H, W, C)
         h_pred = out_stu["h_pred"]     # (B, N, D) — already gated by M_tok
+        act_rms = out_stu["act_rms"]   # (depth,)
 
         # Teacher forward (stop-grad, EMA params)
         out_tea = state.apply_fn(
@@ -275,7 +287,9 @@ def train_step_jepa(state, batch, config_static):
         lambda_j = config_static.lambda_jepa
         l_total = l_gen + lambda_j * l_jepa
 
-        return l_total, {"l_gen": l_gen, "l_jepa": l_jepa, "l_total": l_total}
+        metrics = {"l_gen": l_gen, "l_jepa": l_jepa, "l_total": l_total}
+        metrics.update(_block_rms_metrics(act_rms))
+        return l_total, metrics
 
     (loss, metrics), grads = jax.value_and_grad(loss_fn, has_aux=True)(state.params)
 
@@ -538,11 +552,13 @@ def train_step_jepa2(state, batch, config_static):
             train=True, mode="jepa2",
             z_s=z_s, t_s=s,
             cls_s_noised=cls_s, cls_t_noised=cls_t,
+            debug_collect_act_rms=True,
             rngs={"label_dropout": rng_label},
         )
         v_pred = out["v_pred"]     # (B, H, W, C)
         r_s = out["r_s"]           # (B, D)
         r_t = out["r_t"]           # (B, D)
+        act_rms = out["act_rms"]   # (depth,), measured on t-view branch
 
         # L_gen: MSE on velocity
         l_gen = jnp.mean((v_pred - v_target) ** 2)
@@ -571,7 +587,7 @@ def train_step_jepa2(state, batch, config_static):
         lam = config_static.lambda_jepa2
         l_total = l_gen + lam * (l_jepa + l_sig)
 
-        return l_total, {
+        metrics = {
             "l_gen": l_gen,
             "l_jepa": l_jepa,
             "l_sig": l_sig,
@@ -582,6 +598,8 @@ def train_step_jepa2(state, batch, config_static):
             "mask_ratio_mean": jnp.mean(mask_ratio),
             "k_mask_mean": jnp.mean(k_mask.astype(jnp.float32)),
         }
+        metrics.update(_block_rms_metrics(act_rms))
+        return l_total, metrics
 
     (loss, metrics), grads = jax.value_and_grad(loss_fn, has_aux=True)(state.params)
 

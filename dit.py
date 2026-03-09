@@ -75,7 +75,8 @@ class JepaDiT(nn.Module):
 
     def __call__(self, x, t, y, *, train: bool = False, mode: str = "baseline",
                  mask=None, z_s=None, t_s=None,
-                 cls_s_noised=None, cls_t_noised=None):
+                 cls_s_noised=None, cls_t_noised=None,
+                 debug_collect_act_rms: bool = False):
         """
         Args:
             x:    (B, 32, 32, 4)  latent input (possibly noised)
@@ -101,6 +102,10 @@ class JepaDiT(nn.Module):
         p = self.patch_size
         grid = H // p
 
+        def _rms(v):
+            v = v.astype(jnp.float32)
+            return jnp.sqrt(jnp.mean(jnp.square(v)) + 1e-12)
+
         # --- Fixed positional embedding (stop_gradient) ---
         pos_embed = get_2d_sincos_pos_embed(self.hidden_size, grid)  # (1, N, D) np
         pos_embed = jax.lax.stop_gradient(jnp.array(pos_embed))
@@ -120,11 +125,15 @@ class JepaDiT(nn.Module):
             c_t = self.t_embed(t) + y_emb       # (B, D)
             c_s = self.t_embed(t_s) + y_emb     # (B, D)
 
+            act_rms = [] if debug_collect_act_rms else None
+
             # First split_layer blocks on BOTH views
             split = self.jepa2_split_layer
             for i in range(split):
                 seq_t = self.blocks[i](seq_t, c_t)
                 seq_s = self.blocks[i](seq_s, c_s)
+                if debug_collect_act_rms:
+                    act_rms.append(_rms(seq_t))
 
             # Extract CLS vectors
             r_t = seq_t[:, 0, :]   # (B, D)
@@ -133,6 +142,8 @@ class JepaDiT(nn.Module):
             # Continue only t-view through remaining blocks
             for i in range(split, self.depth):
                 seq_t = self.blocks[i](seq_t, c_t)
+                if debug_collect_act_rms:
+                    act_rms.append(_rms(seq_t))
 
             # FinalLayer on image tokens only (skip CLS at position 0)
             img_tokens = seq_t[:, 1:, :]           # (B, N, D)
@@ -141,7 +152,10 @@ class JepaDiT(nn.Module):
             x_out = jnp.einsum("bhwpqc->bhpwqc", x_out)
             v_pred = x_out.reshape(B, H, W, C)
 
-            return {"v_pred": v_pred, "r_s": r_s, "r_t": r_t}
+            out = {"v_pred": v_pred, "r_s": r_s, "r_t": r_t}
+            if debug_collect_act_rms:
+                out["act_rms"] = jnp.stack(act_rms, axis=0)
+            return out
 
         # --- Patchify + pos embed (baseline / jepa / teacher) ---
         x = self.patch_embed(x)      # (B, N, D)
@@ -152,6 +166,7 @@ class JepaDiT(nn.Module):
 
         # --- Transformer blocks ---
         h_stu = None
+        act_rms = [] if debug_collect_act_rms else None
 
         if mode == "teacher":
             # Early exit: only run first teacher_layer blocks
@@ -163,6 +178,8 @@ class JepaDiT(nn.Module):
         # baseline or jepa: run all blocks
         for i in range(self.depth):
             x = self.blocks[i](x, c)
+            if debug_collect_act_rms:
+                act_rms.append(_rms(x))
 
             # Tap student hidden state at student_layer (jepa mode)
             if mode == "jepa" and i == self.student_layer - 1:
@@ -175,8 +192,14 @@ class JepaDiT(nn.Module):
         v_pred = x.reshape(B, H, W, C)
 
         if mode == "baseline":
-            return {"v_pred": v_pred}
+            out = {"v_pred": v_pred}
+            if debug_collect_act_rms:
+                out["act_rms"] = jnp.stack(act_rms, axis=0)
+            return out
 
         # mode == "jepa"
         h_pred = self.cross_attn_pred(h_stu, mask, pos_embed)
-        return {"v_pred": v_pred, "h_pred": h_pred}
+        out = {"v_pred": v_pred, "h_pred": h_pred}
+        if debug_collect_act_rms:
+            out["act_rms"] = jnp.stack(act_rms, axis=0)
+        return out
