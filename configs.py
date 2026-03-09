@@ -140,7 +140,7 @@ class Config:
         parser.add_argument("--class_dropout_prob", type=float, default=0.2)
         parser.add_argument("--aug_flip_p", type=float, default=0.5)
         parser.add_argument("--aug_jitter_eps", type=float, default=0.01)
-        parser.add_argument("--t_schedule", type=str, default="lognormal",
+        parser.add_argument("--t_schedule", type=str, default="uniform",
                             choices=["lognormal", "uniform"])
         parser.add_argument("--t_lognorm_mean", type=float, default=-0.4)
         parser.add_argument("--t_lognorm_std", type=float, default=1.0)
