@@ -585,7 +585,7 @@ def train_step_jepa2(state, batch, config_static):
         )
 
         lam = config_static.lambda_jepa2
-        l_total = l_gen + lam * (l_jepa + l_sig)
+        l_total = l_gen + lam * (0.95 * l_jepa + 0.05 * l_sig)
 
         metrics = {
             "l_gen": l_gen,

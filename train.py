@@ -453,7 +453,7 @@ def run_validation(state, val_loader, config: Config, num_devices: int) -> dict:
                 domain=(config.jepa2_sigreg_domain_lo, config.jepa2_sigreg_domain_hi),
             ))
 
-            l_total = l_gen + config.lambda_jepa2 * (l_jepa + l_sig)
+            l_total = l_gen + config.lambda_jepa2 * (0.95 * l_jepa + 0.05 * l_sig)
             batch_metrics = {"l_gen": l_gen, "l_jepa": l_jepa, "l_sig": l_sig, "l_total": l_total}
 
         elif config.mode == "baseline":
