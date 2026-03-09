@@ -261,6 +261,8 @@ python train.py \
 
 ### 10.3 JEPA2
 
+Lệnh dưới đây giữ nguyên base config của `10.1 Baseline` và chỉ bổ sung các flag đặc thù cho `jepa2`:
+
 ```bash
 python train.py \
   --mode jepa2 \
