@@ -4,6 +4,7 @@ This repository trains a latent generative model in two modes:
 
 1. `baseline`: DiT + rectified flow / flow matching.
 2. `jepa`: baseline objective + JEPA representation loss (student/EMA-teacher + cross-attention predictor).
+3. `jepa2`: baseline objective + dual-timestep CLS JEPA loss + SIGReg regularization (Self-Flow + LeJEPA inspired, no teacher/EMA).
 
 This README reflects the current codebase status, especially:
 - `train.py`
@@ -79,6 +80,36 @@ Per batch:
    - `L_JEPA = 1 - cosine(h_pred, h_target)` on target tokens (`M_tok`)
    - `L_total = L_gen + lambda_jepa * L_JEPA`
 9. Optimizer update on student params, then EMA update.
+
+### 3.3 JEPA2 (Self-Flow + LeJEPA)
+
+Per batch:
+1. Apply the same latent augmentations.
+2. Sample `t` via logit-normal shifted: `t = sigmoid(N(0,1) + 1.78)`.
+3. Sample `alpha ~ U(1.4, 2.0)`, compute `s = t / alpha` (ensures `s < t`).
+4. Generate shared noise `eps_img ~ N(0, I)` for image tokens and `eps_reg ~ N(0, I)` for CLS token.
+5. Build two noise levels: `z_s = (1-s)*z0 + s*eps_img`, `z_t = (1-t)*z0 + t*eps_img`.
+6. Noise learnable CLS token: `cls_s = (1-s)*c_reg + s*eps_reg`, `cls_t = (1-t)*c_reg + t*eps_reg`.
+7. Sample random mask ratio `ρ_i ~ U(0.2, 0.4)` per sample, exact-k integer masking via argsort+rank.
+8. Build mixed view: `z_mix = M * z_t + (1-M) * z_s` (masked tokens get noisier `z_t`).
+9. Prepend CLS tokens to form sequences: `Seq_s = [cls_s | z_s]`, `Seq_t = [cls_t | z_mix]` → 257 tokens each.
+10. Run first 4 DiT blocks on **both** views (shared weights, different timestep conditioning).
+11. Extract CLS vectors: `r_s = H_s[:,0,:]`, `r_t = H_t[:,0,:]`.
+12. Continue only t-view through blocks 5→12.
+13. FinalLayer on image tokens only (skip CLS) → `v_pred`.
+14. Loss terms:
+    - `L_gen = MSE(v_pred, eps_img - z0)` (flow matching velocity)
+    - `L_JEPA = mean(1 - cosine(r_t, r_s))` (cosine on CLS vectors)
+    - `L_SIG = 0.5 * SIGReg(r_s) + 0.5 * SIGReg(r_t)` (Epps-Pulley, 512 slices, global batch via `all_gather`)
+    - `L_total = L_gen + 0.05 * (L_JEPA + L_SIG)`
+15. No EMA teacher, no stop-grad, no cross-attention predictor.
+
+Key differences from `jepa` mode:
+- No teacher network or EMA — both views share the same backbone pass.
+- JEPA loss is on CLS vectors only, not per-token.
+- SIGReg regularization prevents CLS collapse without stop-grad.
+- Timestep scheduling uses logit-normal shifted + alpha-based dual-timestep.
+- Variable mask ratio (20-40%) with exact integer token masking.
 
 ## 4) Sampling and Inference
 
