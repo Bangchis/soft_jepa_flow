@@ -56,6 +56,7 @@ class StaticConfig(NamedTuple):
     t_lognorm_std: float
     # JEPA2
     lambda_jepa2: float = 0.05
+    jepa2_fm_warmup_steps: int = 10_000
     jepa2_split_layer: int = 4
     jepa2_mask_lo: float = 0.2
     jepa2_mask_hi: float = 0.4
@@ -518,7 +519,7 @@ def train_step_jepa2(state, batch, config_static):
     """One training step for JEPA2 mode.
 
     Dual-timestep (logit-normal shifted), variable exact-k masking,
-    cosine JEPA loss on CLS vectors, SIGReg on global-batch CLS.
+    token-level hidden alignment + token SIGReg, and FM warmup weighting.
 
     Args:
         state:         TrainState (replicated)
@@ -629,7 +630,16 @@ def train_step_jepa2(state, batch, config_static):
         )
 
         lam = config_static.lambda_jepa2
-        l_total = l_gen + lam * (0.95 * l_pred + 0.05 * l_sig)
+        warmup_steps = config_static.jepa2_fm_warmup_steps
+        if warmup_steps > 0:
+            fm_weight = jnp.clip(
+                jnp.asarray(state.step, dtype=jnp.float32) / float(warmup_steps),
+                0.0,
+                1.0,
+            )
+        else:
+            fm_weight = jnp.array(1.0, dtype=jnp.float32)
+        l_total = fm_weight * l_gen + lam * (0.95 * l_pred + 0.05 * l_sig)
 
         metrics = {
             "l_gen": l_gen,
@@ -637,6 +647,7 @@ def train_step_jepa2(state, batch, config_static):
             "l_gen_l": l_gen_l,
             "l_pred": l_pred,
             "l_sig": l_sig,
+            "fm_weight": fm_weight,
             "l_total": l_total,
             "t_mean": jnp.mean(t),
             "s_mean": jnp.mean(s),

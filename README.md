@@ -4,7 +4,7 @@ This repository trains a latent generative model in three modes:
 
 1. `baseline`: DiT + rectified flow / flow matching.
 2. `jepa`: baseline objective + JEPA representation loss (student/EMA-teacher + cross-attention predictor).
-3. `jepa2`: baseline objective + dual-timestep CLS JEPA loss + SIGReg regularization (Self-Flow + LeJEPA inspired, no teacher/EMA).
+3. `jepa2`: baseline objective + dual-timestep token-level alignment loss + SIGReg regularization (Self-Flow + LeJEPA inspired, no teacher branch).
 
 This README reflects the current codebase status, especially:
 - `train.py`
@@ -25,7 +25,7 @@ This README reflects the current codebase status, especially:
   - `logging_utils.log_sample_grid` now decodes real RGB via SD-VAE.
 - JEPA/JEPA2 validation paths are integrated in `run_validation`.
   - In JEPA mode, validation logs `L_gen`, `L_repa`, and `L_total`.
-  - In JEPA2 mode, validation logs `L_gen`, `L_jepa`, `L_sig`, and `L_total`.
+  - In JEPA2 mode, validation logs `L_gen`, `L_pred`, `L_sig`, and `L_total`.
 - Standalone inference script is now available.
   - `infer.py` supports loading checkpoints and running sampling/optional decode outside `train.py`.
 
@@ -88,27 +88,28 @@ Per batch:
 1. Apply the same latent augmentations.
 2. Sample `t` via logit-normal shifted: `t = sigmoid(N(0,1) + 1.78)`.
 3. Sample `alpha ~ U(1.4, 2.0)`, compute `s = t / alpha` (ensures `s < t`).
-4. Generate shared noise `eps_img ~ N(0, I)` for image tokens and `eps_reg ~ N(0, I)` for CLS token.
+4. Generate shared image noise `eps_img ~ N(0, I)`.
 5. Build two noise levels: `z_s = (1-s)*z0 + s*eps_img`, `z_t = (1-t)*z0 + t*eps_img`.
-6. Noise learnable CLS token: `cls_s = (1-s)*c_reg + s*eps_reg`, `cls_t = (1-t)*c_reg + t*eps_reg`.
-7. Sample random mask ratio `ρ_i ~ U(0.2, 0.4)` per sample, exact-k integer masking via argsort+rank.
-8. Build mixed view: `z_mix = M * z_t + (1-M) * z_s` (masked tokens get noisier `z_t`).
-9. Prepend CLS tokens to form sequences: `Seq_s = [cls_s | z_s]`, `Seq_t = [cls_t | z_mix]` → 257 tokens each.
-10. Run first 4 DiT blocks on **both** views (shared weights, different timestep conditioning).
-11. Extract CLS vectors: `r_s = H_s[:,0,:]`, `r_t = H_t[:,0,:]`.
-12. Continue only t-view through blocks 5→12.
-13. FinalLayer on image tokens only (skip CLS) → `v_pred`.
-14. Loss terms:
-    - `L_gen = MSE(v_pred, eps_img - z0)` (flow matching velocity)
-    - `L_JEPA = mean(1 - cosine(r_t, r_s))` (cosine on CLS vectors)
-    - `L_SIG = 0.5 * SIGReg(r_s) + 0.5 * SIGReg(r_t)` (Epps-Pulley ECF numerical integration, 512 slices, 17 points on `[-5,5]`, global batch via `all_gather`)
-    - `L_total = L_gen + 0.05 * (L_JEPA + L_SIG)`
-15. No EMA teacher, no stop-grad, no cross-attention predictor.
+6. Sample random mask ratio `ρ_i ~ U(0.2, 0.4)` per sample, then exact-k integer masking via argsort+rank.
+7. Build mixed local view: `z_mix = M * z_t + (1-M) * z_s` (masked tokens get noisier `z_t`).
+8. Forward `mode="jepa2"` with both views (`x=z_mix, t`) and (`z_s, t_s=s`), shared backbone weights.
+9. At `jepa2_split_layer`, tap hidden maps `h_l` and `h_g`; both views still continue through full depth.
+10. FinalLayer predicts velocity for both views: `v_pred_l` and `v_pred_g`.
+11. Loss terms:
+    - `L_gen = 0.5 * [MSE(v_pred_l, v_target) + MSE(v_pred_g, v_target)]`
+    - `L_pred = mean((h_l - h_g)^2)` (token-level hidden alignment)
+    - `L_sig = TokenSIGReg(all_gather(h_g))` (token-wise SIGReg on global hidden map)
+    - `w_fm(step) = clip(step / jepa2_fm_warmup_steps, 0, 1)` (or `1` when `jepa2_fm_warmup_steps <= 0`)
+    - `L_total = w_fm(step) * L_gen + lambda_jepa2 * (0.95 * L_pred + 0.05 * L_sig)`
+12. No teacher branch, no stop-grad branch, no `CrossAttentionPredictor`.
+13. EMA shadow weights are still updated after optimizer step (used by sampling/inference).
 
 Key differences from `jepa` mode:
-- No teacher network or EMA — both views share the same backbone pass.
-- JEPA loss is on CLS vectors only, not per-token.
-- SIGReg regularization prevents CLS collapse without stop-grad.
+- No teacher forward (`mode="teacher"`), no `TeacherHead`, and no `CrossAttentionPredictor`.
+- Alignment term is token-level MSE (`L_pred`) at split-layer hidden maps, not CLS cosine.
+- SIGReg regularization is token-wise on `h_g` after global-batch `all_gather`.
+- EMA is kept as a shadow parameter copy for sampling/checkpoint use (not as an EMA teacher branch).
+- FM term (`L_gen`) is warm-started with linear weight ramp 0→1 in early training.
 - Timestep scheduling uses logit-normal shifted + alpha-based dual-timestep.
 - Variable mask ratio (20-40%) with exact integer token masking.
 
@@ -173,9 +174,11 @@ Real stats cache:
 `run_validation` is the active validation path:
 - `baseline`: logs `L_gen`, `L_total`
 - `jepa`: logs `L_gen`, `L_repa`, `L_total`
-- `jepa2`: logs `L_gen`, `L_jepa`, `L_sig`, `L_total`
+- `jepa2`: logs `L_gen`, `L_pred`, `L_sig`, `L_total`
 
-`L_repa` is the JEPA-like representation term computed from cosine similarity.
+`L_repa` is the JEPA representation term computed from cosine similarity in `jepa` mode.
+In `jepa2`, the representation term is `L_pred` (token-level hidden MSE).
+FM warmup (`w_fm`) is applied in training only; validation keeps `L_total = L_gen + lambda_jepa2 * (0.95 * L_pred + 0.05 * L_sig)`.
 
 ## 7) W&B Logging and Model Debug
 
@@ -275,7 +278,7 @@ python train.py \
   --steps 200000 \
   --opt adam --lr 1e-4 --beta1 0.9 --beta2 0.99 --weight_decay 0.0 \
   --t_schedule lognormal --t_lognorm_mean -0.4 --t_lognorm_std 1.0 \
-  --lambda_jepa2 0.05 --jepa2_split_layer 4 \
+  --lambda_jepa2 0.05 --jepa2_fm_warmup_steps 10000 --jepa2_split_layer 4 \
   --jepa2_mask_lo 0.2 --jepa2_mask_hi 0.4 \
   --jepa2_t_shift 1.78 --jepa2_alpha_lo 1.4 --jepa2_alpha_hi 2.0 \
   --jepa2_sigreg_slices 512 --jepa2_sigreg_sigma 1.0 \
@@ -287,9 +290,10 @@ python train.py \
 
 `jepa2` design notes:
 - no teacher network
-- no EMA teacher update
+- no EMA teacher branch
 - no stop-gradient branch
 - no `CrossAttentionPredictor`
+- EMA shadow params are still updated for sampling/checkpoint compatibility
 
 ### 10.4 Inference from checkpoint
 
@@ -359,6 +363,7 @@ python infer.py \
 
 ### JEPA2
 - `--lambda_jepa2` = `0.05`
+- `--jepa2_fm_warmup_steps` = `10000`
 - `--jepa2_split_layer` = `4`
 - `--jepa2_mask_lo` = `0.2`
 - `--jepa2_mask_hi` = `0.4`

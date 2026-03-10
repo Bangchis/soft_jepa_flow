@@ -71,6 +71,7 @@ def make_config_static(config: Config) -> StaticConfig:
         t_lognorm_std=config.t_lognorm_std,
         # JEPA2
         lambda_jepa2=config.lambda_jepa2,
+        jepa2_fm_warmup_steps=config.jepa2_fm_warmup_steps,
         jepa2_split_layer=config.jepa2_split_layer,
         jepa2_mask_lo=config.jepa2_mask_lo,
         jepa2_mask_hi=config.jepa2_mask_hi,
