@@ -70,13 +70,7 @@ class JepaDiT(nn.Module):
         self.teacher_head = TeacherHead(hidden_size=D)
         self.cross_attn_pred = CrossAttentionPredictor(hidden_size=D, num_heads=self.num_heads)
 
-        # JEPA2-specific: learnable readout query + cross-attention
-        self.readout_query = self.param('readout_query', nn.initializers.normal(0.02), (1, 1, D))
-        self.readout_attn = nn.MultiHeadDotProductAttention(
-            num_heads=1,
-            qkv_features=D,
-            kernel_init=nn.initializers.xavier_uniform(),
-        )
+        # JEPA2: no extra learnable readout — token-level hidden maps used directly
 
     def __call__(self, x, t, y, *, train: bool = False, mode: str = "baseline",
                  mask=None, z_s=None, t_s=None,
@@ -96,7 +90,7 @@ class JepaDiT(nn.Module):
             "baseline" → {"v_pred": (B, 32, 32, 4)}
             "jepa"     → {"v_pred": (B, 32, 32, 4), "h_pred": (B, N, D)}
             "teacher"  → {"h_target": (B, N, D)}
-            "jepa2"    → {"v_pred_g": ..., "v_pred_l": ..., "z_g": (B,D), "z_l": (B,D)}
+            "jepa2"    → {"v_pred_g": ..., "v_pred_l": ..., "h_g": (B,N,D), "h_l": (B,N,D)}
         """
         B = x.shape[0]
         H = W = self.latent_size
@@ -149,13 +143,9 @@ class JepaDiT(nn.Module):
             v_pred_g = _unpatchify(tokens_g, c_g)
             v_pred_l = _unpatchify(tokens_l, c_l)
 
-            # Readout: learnable query cross-attends into hidden maps
-            q = jnp.broadcast_to(self.readout_query, (B, 1, D))  # (B, 1, D)
-            z_g = self.readout_attn(q, h_g)[:, 0, :]  # (B, D)
-            z_l = self.readout_attn(q, h_l)[:, 0, :]  # (B, D)
-
+            # Return token-level hidden maps directly
             out = {"v_pred_g": v_pred_g, "v_pred_l": v_pred_l,
-                   "z_g": z_g, "z_l": z_l}
+                   "h_g": h_g, "h_l": h_l}
             if debug_collect_act_rms:
                 out["act_rms"] = jnp.stack(act_rms, axis=0)
             return out

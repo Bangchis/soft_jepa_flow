@@ -164,6 +164,10 @@ def train_step_baseline(state, batch, config_static):
 
     state = state.apply_gradients(grads)
 
+    # EMA update (required for sampling — uses ema_params)
+    ema_decay = config_static.ema_decay
+    state = state.update_ema(ema_decay)
+
     # Advance RNG
     new_rng = jax.random.split(state.rng)[0]
     state = state.replace(rng=new_rng)
@@ -470,6 +474,36 @@ def _cls_sigreg_loss(
     return 0.5 * (loss_s + loss_t)
 
 
+def _token_sigreg_loss(
+    H,
+    rng,
+    num_slices=512,
+    sigma=1.0,
+    num_points=17,
+    domain=(-5.0, 5.0),
+):
+    """SIGReg averaged over all N token positions.
+
+    H: (B_global, N, D) — globally gathered hidden states.
+    For each token position i, applies SIGReg to H[:, i, :] ∈ (B_global, D).
+    Returns scalar = mean over N positions.
+    """
+    N = H.shape[1]
+    rngs = jax.random.split(rng, N)
+    # vmap over token dimension (axis 1)
+    losses = jax.vmap(
+        lambda h_i, r: _sigreg_loss(
+            h_i, r,
+            num_slices=num_slices,
+            sigma=sigma,
+            num_points=num_points,
+            domain=domain,
+        ),
+        in_axes=(1, 0),
+    )(H, rngs)   # (N,)
+    return jnp.mean(losses)
+
+
 # -------------------------------------------------------------------------
 # JEPA2 training step (dual-timestep + CLS JEPA + SIGReg)
 # -------------------------------------------------------------------------
@@ -567,8 +601,8 @@ def train_step_jepa2(state, batch, config_static):
         )
         v_pred_g = out["v_pred_g"]   # (B, H, W, C)
         v_pred_l = out["v_pred_l"]   # (B, H, W, C)
-        z_g = out["z_g"]             # (B, D)
-        z_l = out["z_l"]             # (B, D)
+        h_g = out["h_g"]             # (B, N, D)
+        h_l = out["h_l"]             # (B, N, D)
         act_rms = out["act_rms"]     # (depth,)
 
         # L_gen: MSE on velocity for BOTH views, averaged
@@ -576,15 +610,15 @@ def train_step_jepa2(state, batch, config_static):
         l_gen_l = jnp.mean((v_pred_l - v_target) ** 2)
         l_gen = 0.5 * (l_gen_g + l_gen_l)
 
-        # L_pred: MSE between local and global readout embeddings
-        l_pred = jnp.mean((z_l - z_g) ** 2)
+        # L_pred: token-wise MSE between local and global hidden maps
+        l_pred = jnp.mean((h_l - h_g) ** 2)
 
-        # L_sig: SIGReg on globally-gathered GLOBAL embeddings only
-        z_g_global = jax.lax.all_gather(z_g, axis_name="batch")
-        z_g_global = z_g_global.reshape(-1, D)   # (B_global, D)
+        # L_sig: SIGReg per token position on globally-gathered GLOBAL hidden
+        h_g_global = jax.lax.all_gather(h_g, axis_name="batch")
+        h_g_global = h_g_global.reshape(-1, N, D)   # (B_global, N, D)
 
-        l_sig = _sigreg_loss(
-            z_g_global, rng_sig,
+        l_sig = _token_sigreg_loss(
+            h_g_global, rng_sig,
             num_slices=config_static.jepa2_sigreg_slices,
             sigma=config_static.jepa2_sigreg_sigma,
             num_points=config_static.jepa2_sigreg_num_points,

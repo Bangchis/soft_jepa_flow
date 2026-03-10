@@ -26,7 +26,7 @@ from train_state import TrainState
 from train_step import (
     StaticConfig, train_step_baseline, train_step_jepa, train_step_jepa2,
     _sample_t_logit_normal_shifted, _build_variable_k_mask,
-    _sigreg_loss, _cls_sigreg_loss,
+    _sigreg_loss, _cls_sigreg_loss, _token_sigreg_loss,
 )
 from sample import sample_images
 from checkpoint import save_checkpoint, maybe_restore, BestMetricTracker
@@ -421,19 +421,19 @@ def run_validation(state, val_loader, config: Config, num_devices: int) -> dict:
             )
             v_pred_g = out["v_pred_g"]
             v_pred_l = out["v_pred_l"]
-            z_g = out["z_g"]
-            z_l = out["z_l"]
+            h_g = out["h_g"]             # (B, N, D)
+            h_l = out["h_l"]             # (B, N, D)
 
             l_gen_g = float(jnp.mean((v_pred_g - v_target) ** 2))
             l_gen_l = float(jnp.mean((v_pred_l - v_target) ** 2))
             l_gen = 0.5 * (l_gen_g + l_gen_l)
 
-            # L_pred: MSE between local and global readout embeddings
-            l_pred = float(jnp.mean((z_l - z_g) ** 2))
+            # L_pred: token-wise MSE
+            l_pred = float(jnp.mean((h_l - h_g) ** 2))
 
-            # SIGReg on global embeddings only
-            l_sig = float(_sigreg_loss(
-                z_g,
+            # SIGReg per token position on global hidden
+            l_sig = float(_token_sigreg_loss(
+                h_g,         # (B, N, D) — no pmap so already full batch
                 rng_sig,
                 num_slices=config.jepa2_sigreg_slices,
                 sigma=config.jepa2_sigreg_sigma,
