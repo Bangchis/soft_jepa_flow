@@ -73,6 +73,7 @@ def make_config_static(config: Config) -> StaticConfig:
         lambda_jepa2=config.lambda_jepa2,
         jepa2_fm_warmup_steps=config.jepa2_fm_warmup_steps,
         jepa2_split_layer=config.jepa2_split_layer,
+        jepa2_split_layer_global=config.jepa2_split_layer_global,
         jepa2_mask_lo=config.jepa2_mask_lo,
         jepa2_mask_hi=config.jepa2_mask_hi,
         jepa2_t_shift=config.jepa2_t_shift,
@@ -168,6 +169,7 @@ def main():
         student_layer=config.student_layer,
         teacher_layer=config.teacher_layer,
         jepa2_split_layer=config.jepa2_split_layer,
+        jepa2_split_layer_global=config.jepa2_split_layer_global,
         latent_size=config.latent_size,
         latent_channels=config.latent_channels,
     )

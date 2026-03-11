@@ -41,6 +41,7 @@ class JepaDiT(nn.Module):
     student_layer: int = 4
     teacher_layer: int = 8
     jepa2_split_layer: int = 4
+    jepa2_split_layer_global: int = 7
     latent_size: int = 32
     latent_channels: int = 4
 
@@ -121,15 +122,17 @@ class JepaDiT(nn.Module):
 
             act_rms = [] if debug_collect_act_rms else None
             h_g = h_l = None
-            split = self.jepa2_split_layer
+            split_local = self.jepa2_split_layer
+            split_global = self.jepa2_split_layer_global
 
-            # Run ALL blocks on BOTH views, tap hidden at split_layer
+            # Run ALL blocks on BOTH views, tap hidden at different depths
             for i in range(self.depth):
                 tokens_g = self.blocks[i](tokens_g, c_g)
                 tokens_l = self.blocks[i](tokens_l, c_l)
-                if i == split - 1:
-                    h_g = tokens_g   # (B, N, D)
-                    h_l = tokens_l   # (B, N, D)
+                if i == split_local - 1:
+                    h_l = tokens_l   # (B, N, D) — local at shallow layer
+                if i == split_global - 1:
+                    h_g = tokens_g   # (B, N, D) — global at deeper layer
                 if debug_collect_act_rms:
                     act_rms.append(_rms(tokens_l))
 

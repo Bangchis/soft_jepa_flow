@@ -58,6 +58,7 @@ class StaticConfig(NamedTuple):
     lambda_jepa2: float = 0.05
     jepa2_fm_warmup_steps: int = 10_000
     jepa2_split_layer: int = 4
+    jepa2_split_layer_global: int = 7
     jepa2_mask_lo: float = 0.2
     jepa2_mask_hi: float = 0.4
     jepa2_t_shift: float = 1.78
