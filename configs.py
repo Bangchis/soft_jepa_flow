@@ -64,6 +64,11 @@ class Config:
     jepa2_sigreg_domain_lo: float = -5.0
     jepa2_sigreg_domain_hi: float = 5.0
 
+    # --- Baseline coarse-fine regularization ---
+    lambda_cf: float = 0.5
+    cf_shallow_layer: int = 4
+    cf_deep_layer: int = 10
+
     # --- Eval / Sampling ---
     cfg_scale: float = 2.0
     sample_steps: int = 128
@@ -172,6 +177,11 @@ class Config:
                             type=float, default=-5.0)
         parser.add_argument("--jepa2_sigreg_domain_hi",
                             type=float, default=5.0)
+
+        # Baseline coarse-fine regularization
+        parser.add_argument("--lambda_cf", type=float, default=0.5)
+        parser.add_argument("--cf_shallow_layer", type=int, default=4)
+        parser.add_argument("--cf_deep_layer", type=int, default=10)
 
         # Eval / Sampling
         parser.add_argument("--cfg_scale", type=float, default=2.0)

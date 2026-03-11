@@ -42,6 +42,8 @@ class JepaDiT(nn.Module):
     teacher_layer: int = 8
     jepa2_split_layer: int = 4
     jepa2_split_layer_global: int = 7
+    cf_shallow_layer: int = 4
+    cf_deep_layer: int = 10
     latent_size: int = 32
     latent_channels: int = 4
 
@@ -172,6 +174,7 @@ class JepaDiT(nn.Module):
             return {"h_target": h_target}
 
         # baseline or jepa: run all blocks
+        h_shallow = h_deep = None
         for i in range(self.depth):
             x = self.blocks[i](x, c)
             if debug_collect_act_rms:
@@ -181,6 +184,16 @@ class JepaDiT(nn.Module):
             if mode == "jepa" and i == self.student_layer - 1:
                 h_stu = x
 
+            # Tap coarse-fine hidden states (baseline mode)
+            if mode == "baseline":
+                if i == self.cf_shallow_layer - 1:
+                    h_shallow = x   # (B, N, D)
+                if i == self.cf_deep_layer - 1:
+                    h_deep = x      # (B, N, D)
+
+        # h_final: output of last block, before FinalLayer
+        h_final = x
+
         # --- Unpatchify ---
         x = self.final_layer(x, c)  # (B, N, p*p*C)
         x = x.reshape(B, grid, grid, p, p, C)
@@ -188,7 +201,8 @@ class JepaDiT(nn.Module):
         v_pred = x.reshape(B, H, W, C)
 
         if mode == "baseline":
-            out = {"v_pred": v_pred}
+            out = {"v_pred": v_pred,
+                   "h_shallow": h_shallow, "h_deep": h_deep, "h_final": h_final}
             if debug_collect_act_rms:
                 out["act_rms"] = jnp.stack(act_rms, axis=0)
             return out

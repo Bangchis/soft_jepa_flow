@@ -85,6 +85,9 @@ def make_config_static(config: Config) -> StaticConfig:
         jepa2_sigreg_domain_lo=config.jepa2_sigreg_domain_lo,
         jepa2_sigreg_domain_hi=config.jepa2_sigreg_domain_hi,
         hidden_size=config.hidden_size,
+        lambda_cf=config.lambda_cf,
+        cf_shallow_layer=config.cf_shallow_layer,
+        cf_deep_layer=config.cf_deep_layer,
     )
 
 
@@ -170,6 +173,8 @@ def main():
         teacher_layer=config.teacher_layer,
         jepa2_split_layer=config.jepa2_split_layer,
         jepa2_split_layer_global=config.jepa2_split_layer_global,
+        cf_shallow_layer=config.cf_shallow_layer,
+        cf_deep_layer=config.cf_deep_layer,
         latent_size=config.latent_size,
         latent_channels=config.latent_channels,
     )

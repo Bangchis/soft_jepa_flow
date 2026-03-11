@@ -70,6 +70,9 @@ class StaticConfig(NamedTuple):
     jepa2_sigreg_domain_lo: float = -5.0
     jepa2_sigreg_domain_hi: float = 5.0
     hidden_size: int = 768
+    lambda_cf: float = 0.5
+    cf_shallow_layer: int = 4
+    cf_deep_layer: int = 10
 
 
 def sample_timesteps(rng, shape, config_static):
@@ -147,9 +150,38 @@ def train_step_baseline(state, batch, config_static):
         v_pred = out["v_pred"]
         act_rms = out["act_rms"]
         l_gen = jnp.mean((v_pred - v_target) ** 2)
-        metrics = {"l_gen": l_gen, "l_total": l_gen}
+
+        # Coarse-fine regularization loss
+        h_shallow = out["h_shallow"]  # (B, N, D) — block cf_shallow_layer
+        h_deep = out["h_deep"]        # (B, N, D) — block cf_deep_layer
+        h_final = out["h_final"]      # (B, N, D) — block depth (last)
+
+        grid = config_static.latent_size // config_static.patch_size  # 16
+        D = config_static.hidden_size
+
+        def low_pass(h):
+            """LP(x) = Upsample(AvgPool_2x2(x)): token grid low-pass filter."""
+            h_2d = h.reshape(B, grid, grid, D)
+            # AvgPool 2x2 via reshape+mean → (B, grid/2, grid/2, D)
+            half = grid // 2
+            h_pool = h_2d.reshape(B, half, 2, half, 2, D).mean(axis=(2, 4))
+            # Nearest upsample: repeat each element 2x in both spatial dims
+            h_up = jnp.repeat(jnp.repeat(h_pool, 2, axis=1), 2, axis=2)
+            return h_up.reshape(B, N, D)
+
+        N = grid * grid
+        c4 = low_pass(h_shallow)                     # coarse
+        f10 = h_deep - low_pass(h_deep)              # fine (high-pass residual)
+        t12 = jax.lax.stop_gradient(h_final)          # teacher
+
+        l_cf = jnp.mean((c4 + f10 - t12) ** 2)
+
+        lam_cf = config_static.lambda_cf
+        l_total = l_gen + lam_cf * l_cf
+
+        metrics = {"l_gen": l_gen, "l_cf": l_cf, "l_total": l_total}
         metrics.update(_block_rms_metrics(act_rms))
-        return l_gen, metrics
+        return l_total, metrics
 
     (loss, metrics), grads = jax.value_and_grad(loss_fn, has_aux=True)(state.params)
 
