@@ -195,12 +195,11 @@ def train_step_baseline(state, batch, config_static):
         f10 = h_deep - low_pass(h_deep)              # fine (high-pass residual)
         t12 = jax.lax.stop_gradient(h_final)          # teacher
 
-        # Token-wise L2 on normalized features to reduce scale blow-up.
+        # Token-wise cosine similarity loss.
         pred_cf = _safe_l2_normalize(c4 + f10)            # (B, N, D)
         tgt_cf = _safe_l2_normalize(t12)                  # (B, N, D)
-        residual = pred_cf - tgt_cf                       # (B, N, D)
-        l_cf_token = jnp.mean(residual ** 2, axis=-1)     # (B, N)
-        l_cf = jnp.mean(l_cf_token)
+        cos_cf = _safe_cosine(pred_cf, tgt_cf)            # (B, N)
+        l_cf = jnp.mean(1.0 - cos_cf)
 
         lam_cf = config_static.lambda_cf
         l_total = l_gen + lam_cf * l_cf
