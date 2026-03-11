@@ -32,6 +32,26 @@ def _safe_cosine(a: jax.Array, b: jax.Array) -> jax.Array:
     return jnp.clip(cos, -1.0, 1.0)
 
 
+def _safe_l2_normalize(x: jax.Array, eps: float = 1e-6) -> jax.Array:
+    """L2-normalize on last dim with epsilon floor."""
+    x2 = jnp.sum(x * x, axis=-1, keepdims=True)
+    denom = jnp.sqrt(jnp.maximum(x2, eps * eps))
+    return x / denom
+
+
+def _sanitize_and_clip_grads(grads):
+    """Replace non-finite grads, then apply global-norm clipping."""
+    grads = jax.tree.map(
+        lambda g: jnp.where(jnp.isfinite(g), g, jnp.zeros_like(g)),
+        grads,
+    )
+    grad_norm = _global_norm(grads)
+    grad_scale = jnp.minimum(1.0, _GRAD_CLIP_NORM / (grad_norm + 1e-6))
+    grad_scale = jnp.where(jnp.isfinite(grad_norm), grad_scale, 0.0)
+    grads = jax.tree.map(lambda g: g * grad_scale, grads)
+    return grads, grad_norm, grad_scale
+
+
 def _block_rms_metrics(act_rms: jax.Array, key_prefix: str = "act_rms_block") -> dict:
     """Flatten per-block activation RMS array into scalar metric dict."""
     n_blocks = act_rms.shape[0]
@@ -175,10 +195,11 @@ def train_step_baseline(state, batch, config_static):
         f10 = h_deep - low_pass(h_deep)              # fine (high-pass residual)
         t12 = jax.lax.stop_gradient(h_final)          # teacher
 
-        # Token-wise L2 coarse-fine regularization:
-        # per-token squared L2 over channel dim, then mean over tokens and batch.
-        residual = c4 + f10 - t12                          # (B, N, D)
-        l_cf_token = jnp.sum(residual ** 2, axis=-1) / D   # (B, N)
+        # Token-wise L2 on normalized features to reduce scale blow-up.
+        pred_cf = _safe_l2_normalize(c4 + f10)            # (B, N, D)
+        tgt_cf = _safe_l2_normalize(t12)                  # (B, N, D)
+        residual = pred_cf - tgt_cf                       # (B, N, D)
+        l_cf_token = jnp.mean(residual ** 2, axis=-1)     # (B, N)
         l_cf = jnp.mean(l_cf_token)
 
         lam_cf = config_static.lambda_cf
@@ -190,15 +211,9 @@ def train_step_baseline(state, batch, config_static):
 
     (loss, metrics), grads = jax.value_and_grad(loss_fn, has_aux=True)(state.params)
 
-    # Sync across devices + gradient clipping (NaN-safe)
+    # Sync across devices + sanitize/clip gradients
     grads = jax.lax.pmean(grads, axis_name="batch")
-    grad_norm = _global_norm(grads)
-    grad_scale = jnp.where(
-        jnp.isfinite(grad_norm),
-        jnp.minimum(1.0, _GRAD_CLIP_NORM / (grad_norm + 1e-6)),
-        0.0,  # zero out NaN/inf gradients entirely
-    )
-    grads = jax.tree.map(lambda g: g * grad_scale, grads)
+    grads, grad_norm, grad_scale = _sanitize_and_clip_grads(grads)
     metrics = jax.lax.pmean(metrics, axis_name="batch")
     param_norm = jax.lax.pmean(_global_norm(state.params), axis_name="batch")
     metrics = {
@@ -343,11 +358,9 @@ def train_step_jepa(state, batch, config_static):
 
     (loss, metrics), grads = jax.value_and_grad(loss_fn, has_aux=True)(state.params)
 
-    # Sync across devices
+    # Sync across devices + sanitize/clip gradients
     grads = jax.lax.pmean(grads, axis_name="batch")
-    grad_norm = _global_norm(grads)
-    grad_scale = jnp.minimum(1.0, _GRAD_CLIP_NORM / (grad_norm + 1e-6))
-    grads = jax.tree.map(lambda g: g * grad_scale, grads)
+    grads, grad_norm, grad_scale = _sanitize_and_clip_grads(grads)
     metrics = jax.lax.pmean(metrics, axis_name="batch")
     param_norm = jax.lax.pmean(_global_norm(state.params), axis_name="batch")
     metrics = {
@@ -705,11 +718,9 @@ def train_step_jepa2(state, batch, config_static):
 
     (loss, metrics), grads = jax.value_and_grad(loss_fn, has_aux=True)(state.params)
 
-    # Sync across devices
+    # Sync across devices + sanitize/clip gradients
     grads = jax.lax.pmean(grads, axis_name="batch")
-    grad_norm = _global_norm(grads)
-    grad_scale = jnp.minimum(1.0, _GRAD_CLIP_NORM / (grad_norm + 1e-6))
-    grads = jax.tree.map(lambda g: g * grad_scale, grads)
+    grads, grad_norm, grad_scale = _sanitize_and_clip_grads(grads)
     metrics = jax.lax.pmean(metrics, axis_name="batch")
     param_norm = jax.lax.pmean(_global_norm(state.params), axis_name="batch")
     metrics = {
