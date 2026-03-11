@@ -195,10 +195,14 @@ def train_step_baseline(state, batch, config_static):
         f10 = h_deep - low_pass(h_deep)              # fine (high-pass residual)
         t12 = jax.lax.stop_gradient(h_final)          # teacher
 
-        # Token-wise cosine similarity loss.
-        pred_cf = _safe_l2_normalize(c4 + f10)            # (B, N, D)
-        tgt_cf = _safe_l2_normalize(t12)                  # (B, N, D)
-        cos_cf = _safe_cosine(pred_cf, tgt_cf)            # (B, N)
+        # Spherical superposition:
+        # normalize each branch independently before summation to prevent
+        # one branch from dominating purely by magnitude.
+        c4_hat = _safe_l2_normalize(c4)                   # (B, N, D)
+        f10_hat = _safe_l2_normalize(f10)                 # (B, N, D)
+        t12_hat = _safe_l2_normalize(t12)                 # (B, N, D)
+        pred_cf = c4_hat + f10_hat                        # (B, N, D)
+        cos_cf = _safe_cosine(pred_cf, t12_hat)           # (B, N)
         l_cf = jnp.mean(1.0 - cos_cf)
 
         lam_cf = config_static.lambda_cf
