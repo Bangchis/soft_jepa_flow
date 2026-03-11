@@ -50,7 +50,7 @@ class Config:
 
     # --- JEPA2-specific ---
     lambda_jepa2: float = 0.05
-    jepa2_fm_warmup_steps: int = 10_000
+    jepa2_fm_warmup_steps: int = 15000
     jepa2_split_layer: int = 4
     jepa2_mask_lo: float = 0.2
     jepa2_mask_hi: float = 0.4
@@ -155,7 +155,8 @@ class Config:
 
         # JEPA2-specific
         parser.add_argument("--lambda_jepa2", type=float, default=1)
-        parser.add_argument("--jepa2_fm_warmup_steps", type=int, default=10_000)
+        parser.add_argument("--jepa2_fm_warmup_steps",
+                            type=int, default=10_000)
         parser.add_argument("--jepa2_split_layer", type=int, default=4)
         parser.add_argument("--jepa2_mask_lo", type=float, default=0.2)
         parser.add_argument("--jepa2_mask_hi", type=float, default=0.4)
