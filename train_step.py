@@ -70,7 +70,7 @@ class StaticConfig(NamedTuple):
     jepa2_sigreg_domain_lo: float = -5.0
     jepa2_sigreg_domain_hi: float = 5.0
     hidden_size: int = 768
-    lambda_cf: float = 0.5
+    lambda_cf: float = 0.01
     cf_shallow_layer: int = 4
     cf_deep_layer: int = 10
 
@@ -170,11 +170,14 @@ def train_step_baseline(state, batch, config_static):
             return h_up.reshape(B, N, D)
 
         N = grid * grid
+
         c4 = low_pass(h_shallow)                     # coarse
         f10 = h_deep - low_pass(h_deep)              # fine (high-pass residual)
         t12 = jax.lax.stop_gradient(h_final)          # teacher
 
-        l_cf = jnp.mean((c4 + f10 - t12) ** 2)
+        # L2 loss normalized by (N * D)
+        residual = c4 + f10 - t12
+        l_cf = jnp.sum(residual ** 2, axis=(-2, -1)).mean() / (N * D)
 
         lam_cf = config_static.lambda_cf
         l_total = l_gen + lam_cf * l_cf
@@ -185,14 +188,21 @@ def train_step_baseline(state, batch, config_static):
 
     (loss, metrics), grads = jax.value_and_grad(loss_fn, has_aux=True)(state.params)
 
-    # Sync across devices
+    # Sync across devices + gradient clipping (NaN-safe)
     grads = jax.lax.pmean(grads, axis_name="batch")
+    grad_norm = _global_norm(grads)
+    grad_scale = jnp.where(
+        jnp.isfinite(grad_norm),
+        jnp.minimum(1.0, _GRAD_CLIP_NORM / (grad_norm + 1e-6)),
+        0.0,  # zero out NaN/inf gradients entirely
+    )
+    grads = jax.tree.map(lambda g: g * grad_scale, grads)
     metrics = jax.lax.pmean(metrics, axis_name="batch")
-    grad_norm = jax.lax.pmean(_global_norm(grads), axis_name="batch")
     param_norm = jax.lax.pmean(_global_norm(state.params), axis_name="batch")
     metrics = {
         **metrics,
-        "grad_norm": grad_norm,
+        "grad_norm": jax.lax.pmean(grad_norm, axis_name="batch"),
+        "grad_scale": jax.lax.pmean(grad_scale, axis_name="batch"),
         "param_norm": param_norm,
     }
 
