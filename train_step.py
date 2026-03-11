@@ -70,7 +70,7 @@ class StaticConfig(NamedTuple):
     jepa2_sigreg_domain_lo: float = -5.0
     jepa2_sigreg_domain_hi: float = 5.0
     hidden_size: int = 768
-    lambda_cf: float = 0.01
+    lambda_cf: float = 0.1
     cf_shallow_layer: int = 4
     cf_deep_layer: int = 10
 
@@ -175,9 +175,11 @@ def train_step_baseline(state, batch, config_static):
         f10 = h_deep - low_pass(h_deep)              # fine (high-pass residual)
         t12 = jax.lax.stop_gradient(h_final)          # teacher
 
-        # L2 loss normalized by (N * D)
-        residual = c4 + f10 - t12
-        l_cf = jnp.sum(residual ** 2, axis=(-2, -1)).mean() / (N * D)
+        # Token-wise L2 coarse-fine regularization:
+        # per-token squared L2 over channel dim, then mean over tokens and batch.
+        residual = c4 + f10 - t12                          # (B, N, D)
+        l_cf_token = jnp.sum(residual ** 2, axis=-1) / D   # (B, N)
+        l_cf = jnp.mean(l_cf_token)
 
         lam_cf = config_static.lambda_cf
         l_total = l_gen + lam_cf * l_cf
