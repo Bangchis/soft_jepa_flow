@@ -179,7 +179,7 @@ class Config:
                             type=float, default=5.0)
 
         # Baseline coarse-fine regularization
-        parser.add_argument("--lambda_cf", type=float, default=0.1)
+        parser.add_argument("--lambda_cf", type=float, default=0.7)
         parser.add_argument("--cf_shallow_layer", type=int, default=4)
         parser.add_argument("--cf_deep_layer", type=int, default=10)
 
