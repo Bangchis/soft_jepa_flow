@@ -86,6 +86,7 @@ def make_config_static(config: Config) -> StaticConfig:
         jepa2_sigreg_domain_hi=config.jepa2_sigreg_domain_hi,
         hidden_size=config.hidden_size,
         lambda_cf=config.lambda_cf,
+        lambda_cf_ortho=config.lambda_cf_ortho,
         cf_shallow_layer=config.cf_shallow_layer,
         cf_deep_layer=config.cf_deep_layer,
     )

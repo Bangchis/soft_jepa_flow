@@ -91,6 +91,7 @@ class StaticConfig(NamedTuple):
     jepa2_sigreg_domain_hi: float = 5.0
     hidden_size: int = 768
     lambda_cf: float = 0.1
+    lambda_cf_ortho: float = 0.01
     cf_shallow_layer: int = 4
     cf_deep_layer: int = 10
 
@@ -206,9 +207,19 @@ def train_step_baseline(state, batch, config_static):
         l_cf = jnp.mean(1.0 - cos_cf)
 
         lam_cf = config_static.lambda_cf
-        l_total = l_gen + lam_cf * l_cf
+        # Token-wise orthogonality penalty between coarse and fine branches.
+        cos_ortho = _safe_cosine(c4_hat, f10_hat)         # (B, N)
+        l_cf_ortho = jnp.mean(cos_ortho ** 2)
 
-        metrics = {"l_gen": l_gen, "l_cf": l_cf, "l_total": l_total}
+        lam_cf_ortho = config_static.lambda_cf_ortho
+        l_total = l_gen + lam_cf * l_cf + lam_cf_ortho * l_cf_ortho
+
+        metrics = {
+            "l_gen": l_gen,
+            "l_cf": l_cf,
+            "l_cf_ortho": l_cf_ortho,
+            "l_total": l_total,
+        }
         metrics.update(_block_rms_metrics(act_rms))
         return l_total, metrics
 

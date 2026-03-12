@@ -66,6 +66,7 @@ class Config:
 
     # --- Baseline coarse-fine regularization ---
     lambda_cf: float = 0.1
+    lambda_cf_ortho: float = 0.01
     cf_shallow_layer: int = 4
     cf_deep_layer: int = 10
 
@@ -180,6 +181,7 @@ class Config:
 
         # Baseline coarse-fine regularization
         parser.add_argument("--lambda_cf", type=float, default=0.7)
+        parser.add_argument("--lambda_cf_ortho", type=float, default=0.01)
         parser.add_argument("--cf_shallow_layer", type=int, default=4)
         parser.add_argument("--cf_deep_layer", type=int, default=10)
 
