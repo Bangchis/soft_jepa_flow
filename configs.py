@@ -180,8 +180,8 @@ class Config:
                             type=float, default=5.0)
 
         # Baseline coarse-fine regularization
-        parser.add_argument("--lambda_cf", type=float, default=0.12)
-        parser.add_argument("--lambda_cf_ortho", type=float, default=0.01)
+        parser.add_argument("--lambda_cf", type=float, default=0.15)
+        parser.add_argument("--lambda_cf_ortho", type=float, default=0.15)
         parser.add_argument("--cf_shallow_layer", type=int, default=4)
         parser.add_argument("--cf_deep_layer", type=int, default=10)
 
@@ -200,7 +200,7 @@ class Config:
         parser.add_argument("--eval_every", type=int, default=5_000)
         parser.add_argument("--sample_every", type=int, default=10_000)
         parser.add_argument("--fid_every", type=int, default=50_000)
-        parser.add_argument("--ckpt_every", type=int, default=100_000)
+        parser.add_argument("--ckpt_every", type=int, default=200_000)
         parser.add_argument("--run_name", type=str, default="run")
         parser.add_argument("--ckpt_dir", type=str, default="checkpoints")
         parser.add_argument("--best_metric", type=str, default="quick_fid_4096",
